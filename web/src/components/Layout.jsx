@@ -9,6 +9,7 @@ export default function Layout() {
           <NavLink to="/" end>钟点进场</NavLink>
           <NavLink to="/secretary">秘书问题</NavLink>
           <NavLink to="/secretary-2">秘书问题2</NavLink>
+          <NavLink to="/secretary-3">秘书问题3</NavLink>
         </nav>
       </header>
       <Outlet />

@@ -13,6 +13,8 @@ export default defineConfig({
       "/secretary-spot.json": "http://127.0.0.1:8787",
       "/secretary2.json": "http://127.0.0.1:8787",
       "/secretary2-spot.json": "http://127.0.0.1:8787",
+      "/secretary3.json": "http://127.0.0.1:8787",
+      "/secretary3-spot.json": "http://127.0.0.1:8787",
     },
   },
 });

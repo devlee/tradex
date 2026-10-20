@@ -10,6 +10,7 @@ from backtest import (
     Funding,
     fill_missing_funding,
     next_entry_ts,
+    plan_secretary3,
     resample,
     run_backtest,
     secretary_reject_count,
@@ -384,6 +385,104 @@ class SecretaryDayTest(unittest.TestCase):
         self.assertEqual(result.open_cycle.entry_ts, end)
         self.assertEqual(result.open_cycle.entry, 6)
         self.assertEqual(result.entries_secretary_last, 1)
+
+
+class SecretaryImmediateTest(unittest.TestCase):
+    def _closed(self, entry, exit_ts):
+        candles = [Candle(entry, 5, 5.02, 4.99, 5)]
+        ts = entry + QUARTER
+        while ts < exit_ts:
+            candles.append(Candle(ts, 5.02, 5.05, 4.99, 5.02))
+            ts += QUARTER
+        candles.append(Candle(exit_ts, 5.02, 5.2, 5.0, 5.1))
+        return candles
+
+    def test_nine_am_close_uses_the_rest_of_the_same_day(self):
+        exit_ts = bj(2026, 3, 13, 9)
+        day, offset, bars, last, reject = plan_secretary3(exit_ts, QUARTER)
+        self.assertEqual(day, bj(2026, 3, 13))
+        self.assertEqual(offset, 9 * 3_600_000 + QUARTER)
+        self.assertEqual(bars, 44)
+        self.assertEqual(last, 20 * 3_600_000)
+        self.assertEqual(reject, 16)
+
+    def test_fewer_than_ten_bars_waits_until_the_next_morning(self):
+        exit_ts = bj(2026, 3, 13, 19)
+        day, offset, bars, _last, reject = plan_secretary3(exit_ts, QUARTER)
+        self.assertEqual(day, bj(2026, 3, 14))
+        self.assertEqual(offset, 8 * 3_600_000)
+        self.assertEqual(bars, 49)
+        self.assertEqual(reject, 18)
+        ten = plan_secretary3(bj(2026, 3, 13, 17, 30), QUARTER)
+        nine = plan_secretary3(bj(2026, 3, 13, 17, 45), QUARTER)
+        self.assertEqual(ten[0], bj(2026, 3, 13))
+        self.assertEqual(ten[2], 10)
+        self.assertEqual(nine[0], bj(2026, 3, 14))
+
+    def test_close_before_eight_starts_at_eight_the_same_day(self):
+        day, offset, bars, _last, _reject = plan_secretary3(bj(2026, 3, 13, 1), QUARTER)
+        self.assertEqual(day, bj(2026, 3, 13))
+        self.assertEqual(offset, 8 * 3_600_000)
+        self.assertEqual(bars, 49)
+
+    def test_same_day_sample_does_not_buy_until_a_lower_open(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 9)
+        candles = self._closed(entry, exit_ts)
+        _day, offset, _bars, _last, reject = plan_secretary3(exit_ts, QUARTER)
+        start = bj(2026, 3, 13) + offset
+        for slot in range(reject):
+            candles.append(above_limit(start + slot * QUARTER))
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertIsNone(result.open_cycle)
+        signal = start + reject * QUARTER
+        candles.append(Candle(signal, 5.8, 5.9, 5.5, 5.85))
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, signal)
+        self.assertEqual(result.open_cycle.entry, 5.8)
+        self.assertEqual(result.entries_secretary, 1)
+
+    def test_eight_pm_of_the_same_day_is_the_last_bar(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 9)
+        end = bj(2026, 3, 13, 20)
+        candles = self._closed(entry, exit_ts)
+        ts = exit_ts + QUARTER
+        while ts <= end:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, end)
+        self.assertEqual(result.entries_secretary_last, 1)
+
+    def test_short_remainder_does_not_buy_until_the_next_day(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 19)
+        candles = self._closed(entry, exit_ts)
+        ts = exit_ts + QUARTER
+        while ts <= bj(2026, 3, 13, 20):
+            candles.append(Candle(ts, 5.7, 5.8, 5.4, 5.6))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertIsNone(result.open_cycle)
+        end = bj(2026, 3, 14, 20)
+        while ts <= end:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, end)
+        self.assertEqual(result.entries_secretary_last, 1)
+
+    def test_limit_still_fills_before_the_daytime_window(self):
+        entry = bj(2026, 3, 13)
+        exit_ts = bj(2026, 3, 13, 1)
+        candles = self._closed(entry, exit_ts)
+        touch = bj(2026, 3, 13, 3)
+        candles.append(Candle(touch, 4.8, 4.9, 4.7, 4.75))
+        result = run(candles, entry_mode="secretary3", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, touch)
+        self.assertEqual(result.open_cycle.entry, 4.8)
+        self.assertEqual(result.entries_limit, 1)
 
 
 if __name__ == "__main__":

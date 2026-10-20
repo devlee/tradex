@@ -361,6 +361,7 @@ tbody tr.liq-row { color: var(--down); }
 .heat tr.mean td.mean { z-index: 4; box-shadow: inset 1px 1px 0 var(--line); }
 .heat td.current { outline: 2px solid #fff; outline-offset: -2px; }
 
+.secretary tr.mean td { font-weight: 600; }
 .secretary th:first-child, .secretary td:first-child { text-align: left; }
 .secretary td.heat-cell { font-variant-numeric: tabular-nums; }
 

@@ -9,6 +9,10 @@ function idealSells(equity, target, sells, times) {
   return equity * (1 + target) ** (sells * times);
 }
 
+function mean(numbers) {
+  return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
+}
+
 function whole(value) {
   return Math.round(Number(value)).toLocaleString("zh-CN");
 }
@@ -42,6 +46,19 @@ export function ResultTable({ rows, equity }) {
   const tripleHigh = Math.max(...tripled);
   const quadrupleLow = Math.min(...quadrupled);
   const quadrupleHigh = Math.max(...quadrupled);
+  const meanCompound = mean(compounds);
+  const meanDouble = mean(doubled);
+  const meanTriple = mean(tripled);
+  const meanQuadruple = mean(quadrupled);
+  const meanMark = mean(rows.map((row) => row.mark));
+  const meanSells = mean(rows.map((row) => row.sells));
+  const meanLimit = mean(rows.map((row) => row.limit_entries));
+  const meanSecretary = mean(rows.map((row) => row.secretary_entries));
+  const meanLast = mean(rows.map((row) => row.last_entries));
+  const meanHold = mean(rows.map((row) => row.longest_hours));
+  const meanDrawdown = mean(rows.map((row) => row.max_drawdown));
+  const meanFees = mean(rows.map((row) => row.fees));
+  const meanFunding = mean(rows.map((row) => row.funding));
   return (
     <div className="table-wrap">
       <table className="secretary">
@@ -64,6 +81,30 @@ export function ResultTable({ rows, equity }) {
           </tr>
         </thead>
         <tbody>
+          <tr className="mean">
+            <td>均值</td>
+            <td className="heat-cell" style={heatStyle(meanCompound, low, high)} title={`${whole(meanCompound)} USDT`}>
+              {whole(meanCompound)}
+            </td>
+            <td>{whole(meanMark)}</td>
+            <td>{whole(meanSells)}</td>
+            <td className="heat-cell" style={heatStyle(meanDouble, doubleLow, doubleHigh)} title={`${whole(meanDouble)} USDT`}>
+              {whole(meanDouble)}
+            </td>
+            <td className="heat-cell" style={heatStyle(meanTriple, tripleLow, tripleHigh)} title={`${whole(meanTriple)} USDT`}>
+              {whole(meanTriple)}
+            </td>
+            <td className="heat-cell" style={heatStyle(meanQuadruple, quadrupleLow, quadrupleHigh)} title={`${whole(meanQuadruple)} USDT`}>
+              {whole(meanQuadruple)}
+            </td>
+            <td>{whole(meanLimit)}</td>
+            <td>{whole(meanSecretary)}</td>
+            <td>{whole(meanLast)}</td>
+            <td>{hold(meanHold)}</td>
+            <td>{pctWhole(-meanDrawdown)}</td>
+            <td>{whole(meanFees)}</td>
+            <td>{signedWhole(meanFunding)}</td>
+          </tr>
           {rows.map((row, index) => (
             <tr key={row.target}>
               <td>{Math.round(row.target * 100)}%</td>

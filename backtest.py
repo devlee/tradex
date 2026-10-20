@@ -9,6 +9,9 @@
 限价单在这一天仍然有效，先碰到买价就按限价成交。
 秘书问题2相同，但候选人只有北京时间 8:00 到 20:00 的 K 线，20:00 那根是末根。
 限价单不受这个时段限制。
+秘书问题3不再等到平仓日后第 2 天。平仓后立刻从下一根选到当天 20:00；
+早于 8:00 就从当天 8:00 开始。这段不足 10 根，或已经过了 20:00，就改到
+下一个北京日的 8:00 到 20:00。限价单同样不受这个时段限制。
 
 出场：卖出价让整笔账户在扣掉开平手续费和已发生资金费之后，净收益达到目标。
 价格向上取到最小报价单位。持仓期间不因下跌卖出。资金费结算后重算卖价。
@@ -214,15 +217,36 @@ def secretary_reject_count(bar_ms: int, bars: int | None = None) -> int:
     return max(1, round(count / math.e))
 
 
+SESSION_FROM_MS = 8 * 3_600_000
+SESSION_LAST_MS = 20 * 3_600_000
+SECRETARY3_MIN_BARS = 10
+
+
 def secretary_window(bar_ms: int, entry_mode: str) -> tuple[int, int, int]:
     """返回窗口起点偏移、候选根数、最后一根的开盘偏移。秘书问题2是北京时间 8:00 到 20:00。"""
     if entry_mode == "secretary2":
-        start = 8 * 3_600_000
-        last = 20 * 3_600_000
-        bars = (last - start) // bar_ms + 1
-        return start, bars, last
+        bars = (SESSION_LAST_MS - SESSION_FROM_MS) // bar_ms + 1
+        return SESSION_FROM_MS, bars, SESSION_LAST_MS
     bars = DAY_MS // bar_ms
     return 0, bars, (bars - 1) * bar_ms
+
+
+def plan_secretary3(exit_ts: int, bar_ms: int) -> tuple[int, int, int, int, int]:
+    """秘书问题3的下一次选点。返回选点日、起点偏移、候选根数、末根偏移、观察根数。
+
+    关单那根不再买入。从下一根起到当天 20:00；平仓早于 8:00 就从当天 8:00 起。
+    能买的 K 线少于 10 根，或平仓时已经过了 20:00，就改到下一个北京日的 8:00 到 20:00。
+    """
+    day = beijing_day_start(exit_ts)
+    start = max(exit_ts + bar_ms, day + SESSION_FROM_MS)
+    session_last = day + SESSION_LAST_MS
+    if start <= session_last:
+        bars = (session_last - start) // bar_ms + 1
+        if bars >= SECRETARY3_MIN_BARS:
+            return day, start - day, bars, SESSION_LAST_MS, secretary_reject_count(bar_ms, bars)
+    next_day = day + DAY_MS
+    bars = (SESSION_LAST_MS - SESSION_FROM_MS) // bar_ms + 1
+    return next_day, SESSION_FROM_MS, bars, SESSION_LAST_MS, secretary_reject_count(bar_ms, bars)
 
 
 def fill_missing_funding(
@@ -363,7 +387,7 @@ def run_backtest(
     if not 0 <= entry_hour <= 23:
         result.note = "进场钟点需要在 0 到 23 之间。"
         return result
-    if entry_mode not in ("clock", "secretary", "secretary2"):
+    if entry_mode not in ("clock", "secretary", "secretary2", "secretary3"):
         result.note = "进场方式只能是钟点或秘书问题。"
         return result
 
@@ -399,7 +423,15 @@ def run_backtest(
 
     def arm_after_exit(exit_ts: int, entry_price: float) -> None:
         nonlocal scheduled, limit_price, secretary_day, sample_min
-        if entry_mode in ("secretary", "secretary2"):
+        nonlocal window_from, window_bars, window_last, reject_bars
+        if entry_mode == "secretary3":
+            scheduled = None
+            limit_price = entry_price
+            sample_min = None
+            secretary_day, window_from, window_bars, window_last, reject_bars = plan_secretary3(
+                exit_ts, bar_ms
+            )
+        elif entry_mode in ("secretary", "secretary2"):
             scheduled = None
             limit_price = entry_price
             secretary_day = beijing_day_start(exit_ts) + entry_delay_days * DAY_MS
@@ -538,7 +570,7 @@ def run_backtest(
             take_fundings(bar)
 
         if position is None and not just_closed and not blocked:
-            if entry_mode in ("secretary", "secretary2") and limit_price is not None:
+            if entry_mode in ("secretary", "secretary2", "secretary3") and limit_price is not None:
                 consider_secretary(bar)
             elif scheduled is not None:
                 if bar.ts > scheduled:
