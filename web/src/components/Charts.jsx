@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { createChart } from "lightweight-charts";
-import { formatTick, formatTs } from "../format";
+import { formatTick, formatTs, priceOf } from "../format";
+
+const ENTRY_COLORS = ["#e0b15a", "#3cba84", "#7eb6ff", "#e36a5d", "#c58bff", "#f0d7a2", "#5ec8c5", "#f2a35e"];
 
 function chartOptions() {
   return {
@@ -32,16 +34,16 @@ function chartOptions() {
   };
 }
 
-export default function Charts({ data, focus, base = "价格" }) {
+export default function Charts({ data, focus, base = "价格", entries = [] }) {
   const priceHost = useRef(null);
   const equityHost = useRef(null);
   const api = useRef(null);
+  const tick = data?.market.tick_sz ?? 0.001;
 
   useEffect(() => {
     if (!data?.candles?.length || !priceHost.current || !equityHost.current) return undefined;
     const priceChart = createChart(priceHost.current, chartOptions());
     const equityChart = createChart(equityHost.current, chartOptions());
-    const tick = data.market.tick_sz;
     const priceSeries = priceChart.addCandlestickSeries({
       upColor: "#3cba84",
       downColor: "#e36a5d",
@@ -74,11 +76,33 @@ export default function Charts({ data, focus, base = "价格" }) {
       sell: { position: "aboveBar", color: "#e0b15a", shape: "arrowDown", text: "卖" },
       liq: { position: "aboveBar", color: "#e36a5d", shape: "arrowDown", text: "强平" },
     };
-    priceSeries.setMarkers(data.markers.map(([ts, kind, level]) => ({
-      time: Math.floor(ts / 1000),
-      price: level,
-      ...markerStyle[kind],
-    })));
+    const markers = [];
+    data.markers.forEach(([ts, kind, level, book]) => {
+      const time = Math.floor(ts / 1000);
+      const style = markerStyle[kind] || markerStyle.buy;
+      const entry = kind === "buy"
+        ? entries.find((item) => Math.floor(item.ts / 1000) === time && (!book || item.name === book))
+        : null;
+      const text = entry ? `${entry.name} ${priceOf(entry.price, tick)}` : (book ? `${book}${style.text}` : style.text);
+      const previous = markers.find((marker) => marker.time === time);
+      if (previous) {
+        previous.text = `${previous.text} ${text}`;
+        return;
+      }
+      markers.push({ time, price: level, ...style, text });
+    });
+    markers.sort((left, right) => left.time - right.time);
+    priceSeries.setMarkers(markers);
+    entries.forEach((entry, index) => {
+      priceSeries.createPriceLine({
+        price: Number(entry.price),
+        color: ENTRY_COLORS[index % ENTRY_COLORS.length],
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: `${entry.name} ${priceOf(entry.price, tick)}`,
+      });
+    });
     equitySeries.setData(data.curve.map(([ts, equity]) => ({
       time: Math.floor(ts / 1000),
       value: equity,
@@ -102,7 +126,7 @@ export default function Charts({ data, focus, base = "价格" }) {
       equityChart.remove();
       api.current = null;
     };
-  }, [data]);
+  }, [data, entries]);
 
   useEffect(() => {
     if (!focus || !api.current) return;
@@ -122,8 +146,20 @@ export default function Charts({ data, focus, base = "价格" }) {
       <section className="panel">
         <div className="panel-head">
           <h2>价格和成交</h2>
-          <p>绿箭头是买入，金色箭头是按目标卖出。</p>
+          <p>虚线标出每个仓位第一次开仓的价格。下跌只按仓位1的开仓价每 10% 计算，仓位2再跌不会再开新仓。绿箭头是买入，金色箭头是按目标卖出。</p>
         </div>
+        {entries.length ? (
+          <ul className="entry-marks">
+            {entries.map((entry, index) => (
+              <li key={entry.name}>
+                <i style={{ background: ENTRY_COLORS[index % ENTRY_COLORS.length] }} />
+                <span>{entry.name}</span>
+                <strong>{priceOf(entry.price, tick)}</strong>
+                <em>{formatTs(entry.ts)}</em>
+              </li>
+            ))}
+          </ul>
+        ) : null}
         <div ref={priceHost} className="chart chart-price" aria-label={`${base} 价格与买卖点`} />
       </section>
       <section className="panel">

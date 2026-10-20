@@ -1,17 +1,42 @@
-import { useEffect, useState } from "react";
-import { hold } from "../format";
+import { Fragment, useEffect, useState } from "react";
+import { hold, priceOf } from "../format";
 import { heatStyle } from "../spectrum";
 import { bookUrl, useCoin } from "../coin";
 
-const SWAP_NOTE = "这张表是 NEAR-USDT 永续。第一笔仍是 2026-03-13 北京时间 0 点的开盘价。之后一笔结束就在该笔买价挂限价单，价格回到这个买价或更低就成交。到平仓日之后第 2 个北京日还没成交，就把当天 96 根 15 分钟线的开盘价按秘书问题处理：前 35 根只记最低价，不买；之后第一根开盘价低于这个最低价就买入；直到最后一根还没有，就买最后一根。限价单在这一天仍然有效。起始资金 10,000、挂单费率 0.02%，没有记录的资金费按 0.01%。净目标从 1% 到 100%，每档 1%。限价买、秘书买、末根买都不含第一笔。";
-const SPOT_NOTE = "这张表是 NEAR-USDT 现货，进场和卖出规则与上面相同。用现货 15 分钟线，从 2026-03-13 北京时间 0 点起。起始资金 10,000，挂单费率 0.08%。买入的是现货，没有资金费，也不会强平。净目标从 1% 到 100%，每档 1%。";
+const ADDON_NOTE = "表格每一行是仓位1。点开这一行，可以看到同一净目标下后来开出的仓位，以及这一仓建立时第一笔的开仓价。最后一行是总仓位，把这一净目标下各仓的数字加在一起。下跌只按仓位1当时那笔的开仓价计算，每再跌 10% 用 10,000 USDT 新开一仓，最多到跌 90%。新仓再被套不再加仓。";
+const SWAP_NOTE = `这张表是 NEAR-USDT 永续。第一笔仍是 2026-03-13 北京时间 0 点的开盘价。之后一笔结束就在该笔买价挂限价单，价格回到这个买价或更低就成交。到平仓日之后第 2 个北京日还没成交，就把当天 96 根 15 分钟线的开盘价按秘书问题处理：前 35 根只记最低价，不买；之后第一根开盘价低于这个最低价就买入；直到最后一根还没有，就买最后一根。限价单在这一天仍然有效。每个仓位起始资金 10,000、挂单费率 0.02%，没有记录的资金费按 0.01%。净目标从 1% 到 100%，每档 1%。限价买、秘书买、末根买都不含第一笔。${ADDON_NOTE}`;
+const SPOT_NOTE = `这张表是 NEAR-USDT 现货，进场和卖出规则与上面相同。用现货 15 分钟线，从 2026-03-13 北京时间 0 点起。每个仓位起始资金 10,000，挂单费率 0.08%。买入的是现货，没有资金费，也不会强平。净目标从 1% 到 100%，每档 1%。${ADDON_NOTE}`;
 
 function idealSells(equity, target, sells, times) {
   return equity * (1 + target) ** (sells * times);
 }
 
 function mean(numbers) {
-  return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
+  const usable = numbers.filter((value) => value != null && Number.isFinite(value));
+  if (!usable.length) return null;
+  return usable.reduce((sum, value) => sum + value, 0) / usable.length;
+}
+
+const PRICE_TICK = { NEAR: 0.001, PUMP: 0.000001, HYPE: 0.001 };
+
+function booksOf(row) {
+  if (row.books?.length) return row.books;
+  return [row];
+}
+
+function idealsOf(item, equity, fallbackTarget) {
+  if (!item || item.sells == null) return [null, null, null];
+  const target = item.target ?? fallbackTarget;
+  return [2, 3, 4].map((times) => idealSells(equity, target, item.sells, times));
+}
+
+function summedIdeals(books, equity, fallbackTarget) {
+  const parts = books.map((item) => idealsOf(item, equity, fallbackTarget));
+  return [0, 1, 2].map((slot) => {
+    const numbers = parts.map((item) => item[slot]).filter((value) => value != null && Number.isFinite(value));
+    if (!numbers.length) return null;
+    return numbers.reduce((sum, value) => sum + value, 0);
+  });
 }
 
 function whole(value) {
@@ -34,44 +59,101 @@ function pctWhole(value) {
   return text;
 }
 
+function scale(numbers) {
+  const usable = numbers.filter((value) => value != null && Number.isFinite(value));
+  if (!usable.length) return [0, 0];
+  return [Math.min(...usable), Math.max(...usable)];
+}
+
+function heatCell(value, low, high) {
+  if (value == null || !Number.isFinite(value)) return <td>—</td>;
+  return (
+    <td className="heat-cell" style={heatStyle(value, low, high)} title={`${whole(value)} USDT`}>
+      {whole(value)}
+    </td>
+  );
+}
+
+function plain(value, format) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return format(value);
+}
+
+function statCells(view, doubled, tripled, quadrupled, low, high, doubleLow, doubleHigh, tripleLow, tripleHigh, quadrupleLow, quadrupleHigh, heated = true) {
+  const money = (value, scaleLow, scaleHigh) => (
+    heated ? heatCell(value, scaleLow, scaleHigh) : <td>{plain(value, whole)}</td>
+  );
+  return (
+    <>
+      {money(view?.compounded, low, high)}
+      <td>{plain(view?.mark, whole)}</td>
+      <td>{view ? view.sells : "—"}</td>
+      {money(doubled, doubleLow, doubleHigh)}
+      {money(tripled, tripleLow, tripleHigh)}
+      {money(quadrupled, quadrupleLow, quadrupleHigh)}
+      <td>{view ? view.limit_entries : "—"}</td>
+      <td>{view ? view.secretary_entries : "—"}</td>
+      <td>{view ? view.last_entries : "—"}</td>
+      <td>{view ? hold(view.longest_hours) : "—"}</td>
+      <td>{view ? pctWhole(-view.max_drawdown) : "—"}</td>
+      <td>{plain(view?.fees, whole)}</td>
+      <td>{view ? signedWhole(view.funding) : "—"}</td>
+    </>
+  );
+}
+
 export function ResultTable({ rows, equity }) {
-  const compounds = rows.map((row) => row.compounded);
-  const doubled = rows.map((row) => idealSells(equity, row.target, row.sells, 2));
-  const tripled = rows.map((row) => idealSells(equity, row.target, row.sells, 3));
-  const quadrupled = rows.map((row) => idealSells(equity, row.target, row.sells, 4));
-  const low = Math.min(...compounds);
-  const high = Math.max(...compounds);
-  const doubleLow = Math.min(...doubled);
-  const doubleHigh = Math.max(...doubled);
-  const tripleLow = Math.min(...tripled);
-  const tripleHigh = Math.max(...tripled);
-  const quadrupleLow = Math.min(...quadrupled);
-  const quadrupleHigh = Math.max(...quadrupled);
+  const { coin } = useCoin();
+  const tick = PRICE_TICK[coin] || 0.001;
+  const [open, setOpen] = useState(() => new Set());
+  const views = rows.map((row) => booksOf(row)[0]);
+  const idealRows = views.map((view, index) => idealsOf(view, equity, rows[index].target));
+  const compounds = views.map((row) => row?.compounded ?? null);
+  const doubled = idealRows.map((item) => item[0]);
+  const tripled = idealRows.map((item) => item[1]);
+  const quadrupled = idealRows.map((item) => item[2]);
+  const [low, high] = scale(compounds);
+  const [doubleLow, doubleHigh] = scale(doubled);
+  const [tripleLow, tripleHigh] = scale(tripled);
+  const [quadrupleLow, quadrupleHigh] = scale(quadrupled);
   const meanCompound = mean(compounds);
   const meanDouble = mean(doubled);
   const meanTriple = mean(tripled);
   const meanQuadruple = mean(quadrupled);
-  const meanMark = mean(rows.map((row) => row.mark));
-  const meanSells = mean(rows.map((row) => row.sells));
-  const meanLimit = mean(rows.map((row) => row.limit_entries));
-  const meanSecretary = mean(rows.map((row) => row.secretary_entries));
-  const meanLast = mean(rows.map((row) => row.last_entries));
-  const meanHold = mean(rows.map((row) => row.longest_hours));
-  const meanDrawdown = mean(rows.map((row) => row.max_drawdown));
-  const meanFees = mean(rows.map((row) => row.fees));
-  const meanFunding = mean(rows.map((row) => row.funding));
+  const meanMark = mean(views.map((row) => row?.mark ?? null));
+  const meanSells = mean(views.map((row) => row?.sells ?? null));
+  const meanLimit = mean(views.map((row) => row?.limit_entries ?? null));
+  const meanSecretary = mean(views.map((row) => row?.secretary_entries ?? null));
+  const meanLast = mean(views.map((row) => row?.last_entries ?? null));
+  const meanHold = mean(views.map((row) => row?.longest_hours ?? null));
+  const meanDrawdown = mean(views.map((row) => row?.max_drawdown ?? null));
+  const meanFees = mean(views.map((row) => row?.fees ?? null));
+  const meanFunding = mean(views.map((row) => row?.funding ?? null));
+  const idealTitle = "按这一仓的卖出次数计算";
+
+  function toggle(target) {
+    setOpen((current) => {
+      const next = new Set(current);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+  }
+
   return (
     <div className="table-wrap">
       <table className="secretary">
         <thead>
           <tr>
             <th>净目标</th>
+            <th>仓位</th>
+            <th title="这一仓建立时第一笔的开仓价。仓位2及以后按仓位1当时那笔开仓价的下跌计算。">开仓价</th>
             <th>已完成复利</th>
             <th>市值权益</th>
             <th>卖出</th>
-            <th title="卖出次数翻倍，且每笔刚好达到净目标时的已完成复利">卖出2</th>
-            <th title="卖出次数变为 3 倍，且每笔刚好达到净目标时的已完成复利">卖出3</th>
-            <th title="卖出次数变为 4 倍，且每笔刚好达到净目标时的已完成复利">卖出4</th>
+            <th title={`${idealTitle}。卖出次数翻倍，且每笔刚好达到净目标。`}>卖出2</th>
+            <th title={`${idealTitle}。卖出次数变为 3 倍，且每笔刚好达到净目标。`}>卖出3</th>
+            <th title={`${idealTitle}。卖出次数变为 4 倍，且每笔刚好达到净目标。`}>卖出4</th>
             <th>限价买</th>
             <th>秘书买</th>
             <th>末根买</th>
@@ -84,54 +166,74 @@ export function ResultTable({ rows, equity }) {
         <tbody>
           <tr className="mean">
             <td>均值</td>
-            <td className="heat-cell" style={heatStyle(meanCompound, low, high)} title={`${whole(meanCompound)} USDT`}>
-              {whole(meanCompound)}
-            </td>
-            <td>{whole(meanMark)}</td>
-            <td>{whole(meanSells)}</td>
-            <td className="heat-cell" style={heatStyle(meanDouble, doubleLow, doubleHigh)} title={`${whole(meanDouble)} USDT`}>
-              {whole(meanDouble)}
-            </td>
-            <td className="heat-cell" style={heatStyle(meanTriple, tripleLow, tripleHigh)} title={`${whole(meanTriple)} USDT`}>
-              {whole(meanTriple)}
-            </td>
-            <td className="heat-cell" style={heatStyle(meanQuadruple, quadrupleLow, quadrupleHigh)} title={`${whole(meanQuadruple)} USDT`}>
-              {whole(meanQuadruple)}
-            </td>
-            <td>{whole(meanLimit)}</td>
-            <td>{whole(meanSecretary)}</td>
-            <td>{whole(meanLast)}</td>
-            <td>{hold(meanHold)}</td>
-            <td>{pctWhole(-meanDrawdown)}</td>
-            <td>{whole(meanFees)}</td>
-            <td>{signedWhole(meanFunding)}</td>
+            <td>—</td>
+            <td>—</td>
+            {heatCell(meanCompound, low, high)}
+            <td>{plain(meanMark, whole)}</td>
+            <td>{plain(meanSells, whole)}</td>
+            {heatCell(meanDouble, doubleLow, doubleHigh)}
+            {heatCell(meanTriple, tripleLow, tripleHigh)}
+            {heatCell(meanQuadruple, quadrupleLow, quadrupleHigh)}
+            <td>{plain(meanLimit, whole)}</td>
+            <td>{plain(meanSecretary, whole)}</td>
+            <td>{plain(meanLast, whole)}</td>
+            <td>{plain(meanHold, hold)}</td>
+            <td>{meanDrawdown == null ? "—" : pctWhole(-meanDrawdown)}</td>
+            <td>{plain(meanFees, whole)}</td>
+            <td>{meanFunding == null ? "—" : signedWhole(meanFunding)}</td>
           </tr>
-          {rows.map((row, index) => (
-            <tr key={row.target}>
-              <td>{Math.round(row.target * 100)}%</td>
-              <td className="heat-cell" style={heatStyle(row.compounded, low, high)} title={`${whole(row.compounded)} USDT`}>
-                {whole(row.compounded)}
-              </td>
-              <td>{whole(row.mark)}</td>
-              <td>{row.sells}</td>
-              <td className="heat-cell" style={heatStyle(doubled[index], doubleLow, doubleHigh)} title={`${whole(doubled[index])} USDT`}>
-                {whole(doubled[index])}
-              </td>
-              <td className="heat-cell" style={heatStyle(tripled[index], tripleLow, tripleHigh)} title={`${whole(tripled[index])} USDT`}>
-                {whole(tripled[index])}
-              </td>
-              <td className="heat-cell" style={heatStyle(quadrupled[index], quadrupleLow, quadrupleHigh)} title={`${whole(quadrupled[index])} USDT`}>
-                {whole(quadrupled[index])}
-              </td>
-              <td>{row.limit_entries}</td>
-              <td>{row.secretary_entries}</td>
-              <td>{row.last_entries}</td>
-              <td>{hold(row.longest_hours)}</td>
-              <td>{pctWhole(-row.max_drawdown)}</td>
-              <td>{whole(row.fees)}</td>
-              <td>{signedWhole(row.funding)}</td>
-            </tr>
-          ))}
+          {rows.map((row, index) => {
+            const view = views[index];
+            const extra = booksOf(row).slice(1);
+            const expanded = open.has(row.target);
+            const [double, triple, quadruple] = idealRows[index];
+            return (
+              <Fragment key={row.target}>
+                <tr
+                  className={extra.length ? "foldable" : undefined}
+                  aria-expanded={extra.length ? expanded : undefined}
+                  tabIndex={extra.length ? 0 : undefined}
+                  onClick={extra.length ? () => toggle(row.target) : undefined}
+                  onKeyDown={extra.length ? (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      toggle(row.target);
+                    }
+                  } : undefined}
+                >
+                  <td>
+                    <span className="fold-mark" aria-hidden="true">{extra.length ? (expanded ? "▾" : "▸") : ""}</span>
+                    {Math.round(row.target * 100)}%
+                  </td>
+                  <td>仓位1</td>
+                  <td>{view?.entry == null ? "—" : priceOf(view.entry, tick)}</td>
+                  {statCells(view, double, triple, quadruple, low, high, doubleLow, doubleHigh, tripleLow, tripleHigh, quadrupleLow, quadrupleHigh)}
+                </tr>
+                {expanded ? extra.map((item, extraIndex) => {
+                  const [childDouble, childTriple, childQuadruple] = idealsOf(item, equity, row.target);
+                  return (
+                    <tr className="fold-row" key={`${row.target}-${extraIndex + 2}`}>
+                      <td />
+                      <td>{`仓位${extraIndex + 2}`}</td>
+                      <td>{item?.entry == null ? "—" : priceOf(item.entry, tick)}</td>
+                      {statCells(item, childDouble, childTriple, childQuadruple, low, high, doubleLow, doubleHigh, tripleLow, tripleHigh, quadrupleLow, quadrupleHigh)}
+                    </tr>
+                  );
+                }) : null}
+                {expanded && row.total ? (() => {
+                  const [totalDouble, totalTriple, totalQuadruple] = summedIdeals(booksOf(row), equity, row.target);
+                  return (
+                    <tr className="fold-row fold-total" key={`${row.target}-total`}>
+                      <td />
+                      <td>总仓位</td>
+                      <td>—</td>
+                      {statCells(row.total, totalDouble, totalTriple, totalQuadruple, low, high, doubleLow, doubleHigh, tripleLow, tripleHigh, quadrupleLow, quadrupleHigh, false)}
+                    </tr>
+                  );
+                })() : null}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -182,6 +284,7 @@ export default function SecretaryPage() {
           <li>第 2 个北京日仍未成交时，前 35 根开盘价只作为样本。之后第一根低于样本最低价的开盘价买入。</li>
           <li>当天直到最后一根都没有更低的开盘价，就按最后一根的开盘价买入。限价单在这一天仍然优先。</li>
           <li>现货按 {coin}-USDT 的价格买入并持有，挂单费率 0.08%，没有资金费，也不会强平。</li>
+          <li>仓位1的持仓价相对开仓价每再跌 10%，就用最初的 10,000 USDT 新开一个独立仓位。新仓不并进被套的那一笔，之后自己复利。新仓再被套不再加仓。</li>
         </ol>
       </aside>
       <main>

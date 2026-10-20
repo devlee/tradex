@@ -11,7 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from backtest import fill_missing_funding, run_backtest
+from backtest import fill_missing_funding
+from portfolio import combined_curve, run_positions
 from okx_data import (
     BAR_MS,
     COINS,
@@ -34,6 +35,7 @@ RULES = [
     "进场钟点可以改，范围是 0 点到 23 点，每次 1 小时。",
     "卖出价按整笔资金的净目标反推。开仓、平仓手续费和已经结算的资金费都算进去，再向上对齐到最小报价单位。",
     "持仓以后不因为下跌卖出。每 8 小时资金费结算后重算卖价。这根 K 线的最高价碰到卖价，就按卖价成交。卖出后的余额是下一笔本金。",
+    "下跌幅度只按仓位1这笔的开仓价计算，每再跌 10% 就用最初的起始资金新开仓位2、仓位3，最多到跌 90%。仓位2再跌 10% 也不会再开新仓。新仓不并进被套的那一笔，之后自己复利。",
 ]
 
 
@@ -86,6 +88,167 @@ def _open_dict(cycle) -> dict | None:
     }
 
 
+def _stats(result, equity: float, net_target: float) -> dict:
+    normal = [cycle for cycle in result.cycles if cycle.status == "target"]
+    holds = [cycle.hold_hours for cycle in normal]
+    holds_for_max = [cycle.hold_hours for cycle in result.cycles]
+    if result.open_cycle is not None:
+        holds_for_max.append(result.open_cycle.hold_hours)
+    theoretical = None
+    if result.liquidations == 0 and normal:
+        theoretical = equity * ((1 + net_target) ** len(normal))
+    return {
+        "completed": len(normal),
+        "liquidations": result.liquidations,
+        "final_equity": _num(result.final_equity, 4),
+        "final_cash": _num(result.final_cash, 4),
+        "compounded_equity": _num(result.compounded_equity, 4),
+        "max_drawdown": _num(result.max_drawdown),
+        "max_drawdown_ts": result.max_drawdown_ts,
+        "worst_mae": _num(result.worst_mae),
+        "max_hold_hours": _num(max(holds_for_max), 2) if holds_for_max else None,
+        "avg_hold_hours": _num(sum(holds) / len(holds), 2) if holds else None,
+        "total_fees": _num(result.total_fees, 4),
+        "total_funding": _num(result.total_funding, 4),
+        "min_net_return": _num(min(cycle.net_return for cycle in normal)) if normal else None,
+        "avg_net_return": _num(sum(cycle.net_return for cycle in normal) / len(normal)) if normal else None,
+        "max_net_return": _num(max(cycle.net_return for cycle in normal)) if normal else None,
+        "theoretical_equity": _num(theoretical, 4) if theoretical is not None else None,
+        "note": result.note,
+        "next_entry_ts": result.next_entry_ts,
+    }
+
+
+def _markers(result) -> list:
+    markers = []
+    for cycle in result.cycles:
+        markers.append([cycle.entry_ts, "buy", _num(cycle.entry)])
+        kind = "sell" if cycle.status == "target" else "liq"
+        markers.append([cycle.exit_ts, kind, _num(cycle.exit_price)])
+    if result.open_cycle is not None:
+        markers.append([result.open_cycle.entry_ts, "buy", _num(result.open_cycle.entry)])
+    return markers
+
+
+def _curve(result) -> list:
+    return [
+        [point.ts, _num(point.equity, 4), _num(point.cash, 4)] for point in result.curve
+    ]
+
+
+def _pack_position(result, index: int, equity: float, net_target: float) -> dict:
+    name = f"仓位{index + 1}"
+    opened = result.cycles[0] if result.cycles else result.open_cycle
+    current = _open_dict(result.open_cycle)
+    if current is not None:
+        current["book"] = name
+    return {
+        "name": name,
+        "index": index + 1,
+        "role": "base" if index == 0 else "addon",
+        "opened_at": None if opened is None else opened.entry_ts,
+        "entry": None if opened is None else _num(opened.entry),
+        "stats": _stats(result, equity, net_target),
+        "cycles": [_cycle_dict(cycle) for cycle in result.cycles],
+        "open_cycle": current,
+        "curve": _curve(result),
+        "markers": _markers(result),
+    }
+
+
+def _pack_total(books, positions: list[dict], equity: float, net_target: float) -> dict:
+    series, drawdown, drawdown_ts = combined_curve(books)
+    normal = []
+    holds_for_max = []
+    fees = 0.0
+    funding = 0.0
+    liquidations = 0
+    final_equity = 0.0
+    final_cash = 0.0
+    compounded = 0.0
+    worst_mae = 0.0
+    notes = []
+    next_entry = None
+    theoretical = 0.0
+    theoretical_ok = True
+    cycles = []
+    opens = []
+    markers = []
+    for book, position in zip(books, positions):
+        stats = position["stats"]
+        final_equity += book.final_equity
+        final_cash += book.final_cash
+        compounded += book.compounded_equity
+        fees += book.total_fees
+        funding += book.total_funding
+        liquidations += book.liquidations
+        worst_mae = min(worst_mae, book.worst_mae)
+        if book.note:
+            notes.append(book.note)
+        if book.next_entry_ts is not None:
+            next_entry = book.next_entry_ts if next_entry is None else min(next_entry, book.next_entry_ts)
+        if book.liquidations:
+            theoretical_ok = False
+        elif stats["theoretical_equity"] is not None:
+            theoretical += stats["theoretical_equity"]
+        for cycle in book.cycles:
+            if cycle.status == "target":
+                normal.append(cycle)
+            holds_for_max.append(cycle.hold_hours)
+            item = _cycle_dict(cycle)
+            item["book"] = position["name"]
+            cycles.append(item)
+            markers.append([cycle.entry_ts, "buy", _num(cycle.entry), position["name"]])
+            kind = "sell" if cycle.status == "target" else "liq"
+            markers.append([cycle.exit_ts, kind, _num(cycle.exit_price), position["name"]])
+        if book.open_cycle is not None:
+            holds_for_max.append(book.open_cycle.hold_hours)
+            opened = _open_dict(book.open_cycle)
+            opened["book"] = position["name"]
+            opens.append(opened)
+            markers.append([
+                book.open_cycle.entry_ts,
+                "buy",
+                _num(book.open_cycle.entry),
+                position["name"],
+            ])
+    cycles.sort(key=lambda item: (item["entry_ts"], item["book"]))
+    markers.sort(key=lambda item: item[0])
+    holds = [cycle.hold_hours for cycle in normal]
+    return {
+        "name": "总仓位",
+        "book_count": len(books),
+        "stats": {
+            "completed": len(normal),
+            "liquidations": liquidations,
+            "final_equity": _num(final_equity, 4),
+            "final_cash": _num(final_cash, 4),
+            "compounded_equity": _num(compounded, 4),
+            "capital": _num(equity * len(books), 4),
+            "book_count": len(books),
+            "max_drawdown": _num(drawdown),
+            "max_drawdown_ts": drawdown_ts,
+            "worst_mae": _num(worst_mae),
+            "max_hold_hours": _num(max(holds_for_max), 2) if holds_for_max else None,
+            "avg_hold_hours": _num(sum(holds) / len(holds), 2) if holds else None,
+            "total_fees": _num(fees, 4),
+            "total_funding": _num(funding, 4),
+            "min_net_return": _num(min(cycle.net_return for cycle in normal)) if normal else None,
+            "avg_net_return": _num(sum(cycle.net_return for cycle in normal) / len(normal)) if normal else None,
+            "max_net_return": _num(max(cycle.net_return for cycle in normal)) if normal else None,
+            "theoretical_equity": _num(theoretical, 4) if theoretical_ok and normal else None,
+            "note": "；".join(dict.fromkeys(notes)) or None,
+            "next_entry_ts": next_entry,
+        },
+        "cycles": cycles,
+        "open_cycles": opens,
+        "curve": [
+            [ts, _num(mark, 4), _num(cash, 4)] for ts, mark, cash in series
+        ],
+        "markers": markers,
+    }
+
+
 def build_result(
     equity: float,
     net_target: float,
@@ -128,7 +291,7 @@ def build_result(
         ),
         key=lambda item: item[0],
     )
-    result = run_backtest(
+    books = run_positions(
         candles,
         fundings,
         initial_equity=equity,
@@ -144,11 +307,11 @@ def build_result(
         entry_hour=entry_hour,
         tiers=tiers or None,
     )
-    normal = [cycle for cycle in result.cycles if cycle.status == "target"]
-    holds = [cycle.hold_hours for cycle in normal]
-    holds_for_max = [cycle.hold_hours for cycle in result.cycles]
-    if result.open_cycle is not None:
-        holds_for_max.append(result.open_cycle.hold_hours)
+    positions = [
+        _pack_position(book, index, equity, net_target) for index, book in enumerate(books)
+    ]
+    total = _pack_total(books, positions, equity, net_target)
+    base = positions[0]
     warnings = []
     missed = missing_bars(candles, BAR_MS)
     if missed:
@@ -159,17 +322,6 @@ def build_result(
         warnings.append(
             f"有 {assumed_fundings} 次 8 小时资金费没有记录，按 0.01% 计入。"
         )
-    theoretical = None
-    if result.liquidations == 0 and normal:
-        theoretical = equity * ((1 + net_target) ** len(normal))
-    markers = []
-    for cycle in result.cycles:
-        markers.append([cycle.entry_ts, "buy", _num(cycle.entry)])
-        kind = "sell" if cycle.status == "target" else "liq"
-        markers.append([cycle.exit_ts, kind, _num(cycle.exit_price)])
-    if result.open_cycle is not None:
-        markers.append([result.open_cycle.entry_ts, "buy", _num(result.open_cycle.entry)])
-
     rules = list(RULES)
     rules[0] = f"{spec['base']}-USDT 永续，1 倍，只做多，一次只持有一笔。K 线是 15 分钟。"
     return {
@@ -200,36 +352,17 @@ def build_result(
             "entry_delay_days": 2,
             "coin": spec["base"],
         },
-        "stats": {
-            "completed": len(normal),
-            "liquidations": result.liquidations,
-            "final_equity": _num(result.final_equity, 4),
-            "final_cash": _num(result.final_cash, 4),
-            "compounded_equity": _num(result.compounded_equity, 4),
-            "max_drawdown": _num(result.max_drawdown),
-            "max_drawdown_ts": result.max_drawdown_ts,
-            "worst_mae": _num(result.worst_mae),
-            "max_hold_hours": _num(max(holds_for_max), 2) if holds_for_max else None,
-            "avg_hold_hours": _num(sum(holds) / len(holds), 2) if holds else None,
-            "total_fees": _num(result.total_fees, 4),
-            "total_funding": _num(result.total_funding, 4),
-            "min_net_return": _num(min(cycle.net_return for cycle in normal)) if normal else None,
-            "avg_net_return": _num(sum(cycle.net_return for cycle in normal) / len(normal)) if normal else None,
-            "max_net_return": _num(max(cycle.net_return for cycle in normal)) if normal else None,
-            "theoretical_equity": _num(theoretical, 4) if theoretical is not None else None,
-            "note": result.note,
-            "next_entry_ts": result.next_entry_ts,
-        },
-        "cycles": [_cycle_dict(cycle) for cycle in result.cycles],
-        "open_cycle": _open_dict(result.open_cycle),
+        "stats": base["stats"],
+        "cycles": base["cycles"],
+        "open_cycle": base["open_cycle"],
+        "positions": positions,
+        "total": total,
         "candles": [
             [candle.ts, _num(candle.o), _num(candle.h), _num(candle.l), _num(candle.c)]
             for candle in candles
         ],
-        "curve": [
-            [point.ts, _num(point.equity, 4), _num(point.cash, 4)] for point in result.curve
-        ],
-        "markers": markers,
+        "curve": base["curve"],
+        "markers": base["markers"],
     }
 
 

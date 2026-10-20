@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Charts from "../components/Charts";
 import HeatGrid from "../components/HeatGrid";
 import { bookUrl, useCoin } from "../coin";
@@ -19,6 +19,7 @@ const RULES = [
   "进场钟点可以改，范围是 0 点到 23 点，每次 1 小时。",
   "卖出价按整笔资金的净目标反推。开仓、平仓手续费和已经结算的资金费都算进去，再向上对齐到最小报价单位。",
   "持仓以后不因为下跌卖出。每 8 小时资金费结算后重算卖价。这根 K 线的最高价碰到卖价，就按卖价成交。卖出后的余额是下一笔本金。",
+  "下跌幅度只按仓位1这笔的开仓价计算，每再跌 10% 就用最初的起始资金新开仓位2、仓位3，最多到跌 90%。仓位2再跌 10% 也不会再开新仓。新仓不并进被套的那一笔，之后自己复利。",
 ];
 
 const INITIAL_FORM = {
@@ -29,12 +30,48 @@ const INITIAL_FORM = {
   hour: "0",
 };
 
-function summaryText(data) {
-  const stats = data.stats;
-  const bits = [
-    `${formatTs(data.market.start)} 到 ${formatTs(data.market.end)}，共 ${data.market.count} 根 15 分钟 K 线。进场钟点是北京时间 ${data.params.entry_hour} 点。`,
+function buildView(data, bookTab) {
+  if (!data) return null;
+  const shared = {
+    market: data.market,
+    params: data.params,
+    candles: data.candles,
+    rules: data.rules,
+  };
+  if (bookTab === "total" && data.total) {
+    return { ...shared, ...data.total, kind: "total" };
+  }
+  const index = bookTab === "total" ? 0 : bookTab;
+  const book = data.positions?.[index];
+  if (!book) {
+    return {
+      ...shared,
+      name: "仓位1",
+      role: "base",
+      stats: data.stats,
+      cycles: data.cycles,
+      open_cycle: data.open_cycle,
+      curve: data.curve,
+      markers: data.markers,
+      kind: "book",
+    };
+  }
+  return { ...shared, ...book, kind: "book" };
+}
+
+function summaryText(view) {
+  const stats = view.stats;
+  const opens = view.open_cycles || (view.open_cycle ? [view.open_cycle] : []);
+  const bits = [];
+  if (view.kind === "total") {
+    bits.push(`总仓位把 ${stats.book_count} 个仓位加在一起。每个仓位起始资金 ${money(view.params.initial_equity)} USDT，合计 ${money(stats.capital)} USDT。`);
+  } else if (view.role === "addon") {
+    bits.push(`${view.name}在 ${formatTs(view.opened_at)} 以 ${priceOf(view.entry, view.market.tick_sz)} 开出，起始资金仍是 ${money(view.params.initial_equity)} USDT。`);
+  }
+  bits.push(
+    `${formatTs(view.market.start)} 到 ${formatTs(view.market.end)}，共 ${view.market.count} 根 15 分钟 K 线。进场钟点是北京时间 ${view.params.entry_hour} 点。`,
     `正常卖出 ${stats.completed} 笔。`,
-  ];
+  );
   if (stats.completed) {
     bits.push(`这些周期连乘后的余额是 ${money(stats.compounded_equity)} USDT。`);
     if (stats.theoretical_equity != null) {
@@ -44,13 +81,15 @@ function summaryText(data) {
       bits.push(`最长的一笔拿了 ${hold(stats.max_hold_hours)}。`);
     }
   }
-  if (data.open_cycle) {
+  if (opens.length > 1) {
+    bits.push(`结束时还有 ${opens.length} 笔没卖掉，按最后收盘价加总，市值权益是 ${money(stats.final_equity)} USDT。`);
+  } else if (opens.length === 1) {
     bits.push(`结束时还有一笔没卖掉，按最后收盘价算，市值权益是 ${money(stats.final_equity)} USDT。`);
   } else if (stats.completed) {
     bits.push(`结束时是空仓，市值权益是 ${money(stats.final_equity)} USDT。`);
   }
   if (stats.liquidations) bits.push(`另外有 ${stats.liquidations} 笔被强平。`);
-  if (!data.open_cycle && stats.next_entry_ts) {
+  if (!opens.length && stats.next_entry_ts) {
     bits.push(`下一笔计划在 ${formatTs(stats.next_entry_ts)} 的开盘价。`);
   }
   return bits.join("");
@@ -67,6 +106,7 @@ export default function ClockPage() {
   const [status, setStatus] = useState("正在准备行情。");
   const [running, setRunning] = useState(false);
   const [activeKey, setActiveKey] = useState(null);
+  const [bookTab, setBookTab] = useState("total");
   const requestId = useRef(0);
 
   async function loadBacktest(nextForm, nextCoin) {
@@ -83,6 +123,7 @@ export default function ClockPage() {
       if (id !== requestId.current) return;
       if (!response.ok) throw new Error(payload.error || "回测失败");
       setData(payload);
+      setBookTab("total");
       setActiveKey(null);
       setStatus("回测完成。这是本地行情的重放，用来观察这条规则，不是对以后收益的预测。");
     } catch (error) {
@@ -120,30 +161,41 @@ export default function ClockPage() {
     setForm((current) => ({ ...current, [name]: value }));
   }
 
+  const view = useMemo(() => buildView(data, bookTab), [data, bookTab]);
   const base = data?.market.coin || coin;
-  const stats = data?.stats;
+  const stats = view?.stats;
   const tick = data?.market.tick_sz ?? 0.001;
   const targetText = data
     ? String(Math.round(data.params.net_target * 1000) / 10).replace(/\.0$/, "")
     : form.net;
   const funding = Number(stats?.total_funding || 0);
-  const sample = data
-    ? [...data.cycles].reverse().find((cycle) => cycle.status === "target") || data.open_cycle
+  const opens = view?.open_cycles || (view?.open_cycle ? [view.open_cycle] : []);
+  const sample = view
+    ? [...view.cycles].reverse().find((cycle) => cycle.status === "target") || opens[0] || null
     : null;
-  const rows = data
-    ? (data.open_cycle ? [...data.cycles, { ...data.open_cycle, status: "open" }] : data.cycles)
+  const rows = view
+    ? [...view.cycles, ...opens.map((cycle) => ({ ...cycle, status: "open" }))]
     : [];
-  const focus = activeKey == null ? null : {
+  const focus = activeKey == null || !view ? null : {
     entryTs: rows[activeKey].entry_ts,
     exitTs: rows[activeKey].exit_ts,
-    endTs: data.market.end,
+    endTs: view.market.end,
   };
+  const bookCount = data?.positions?.length || 1;
+  const entries = useMemo(
+    () => (data?.positions || []).filter((item) => item.entry != null).map((item) => ({
+      name: item.name,
+      price: item.entry,
+      ts: item.opened_at,
+    })),
+    [data],
+  );
 
   return (
     <div className="layout">
       <aside>
         <h1>{base} 永续<br /><span>{targetText}%</span> 净收益周期</h1>
-        <p className="lede">用 15 分钟 K 线重放：在指定钟点的开盘价买入，净赚到目标就卖，没赚到就继续拿着，卖完用新的余额做下一笔。</p>
+        <p className="lede">用 15 分钟 K 线重放：在指定钟点的开盘价买入，净赚到目标就卖，没赚到就继续拿着，卖完用新的余额做下一笔。只有仓位1的开仓价用来算下跌，每再跌 10% 另开一个独立仓位。</p>
         <ol className="rules">
           {(data?.rules || RULES).map((rule) => <li key={rule}>{rule.replaceAll("NEAR", base)}</li>)}
         </ol>
@@ -169,7 +221,7 @@ export default function ClockPage() {
             <input name="hour" type="number" min="0" max="23" step="1" value={form.hour} onChange={update} />
           </label>
           <button type="submit" disabled={running}>重新回测</button>
-          <p className="hint">K 线固定为 15 分钟。例如 3 月 13 日平仓、钟点为 0，下一笔就在 3 月 15 日 0 点那根 K 线的开盘价买入。费率按页面上的数字计，默认 0.02%。</p>
+          <p className="hint">K 线固定为 15 分钟。例如 3 月 13 日平仓、钟点为 0，下一笔就在 3 月 15 日 0 点那根 K 线的开盘价买入。费率按页面上的数字计，默认 0.02%。每个新仓都用这里的起始资金，不使用仓位1后来的余额。</p>
         </form>
         {data ? (
           <p className="spec">合约 {data.market.inst_id}，1 张 = {data.market.ct_val} {base}，最小 {data.market.lot_sz} 张，报价步进 {data.market.tick_sz}。小仓位维持保证金 {(data.market.mmr * 100).toFixed(2)}%。行情文件更新于 {formatTs(data.market.fetched_at)}。</p>
@@ -179,21 +231,40 @@ export default function ClockPage() {
         <p className="status" role="status">{status}</p>
         {data?.market.warnings.map((text) => <p className="warning" key={text}>{text}</p>)}
         {stats?.note ? <p className="warning">{stats.note}</p> : null}
-        {data ? <p className="summary">{summaryText(data)}</p> : null}
-        {data?.open_cycle ? <OpenPosition open={data.open_cycle} tick={tick} base={base} /> : null}
+        {view ? (
+          <div className="book-tabs" role="tablist" aria-label="仓位">
+            <button type="button" role="tab" aria-selected={bookTab === "total"} onClick={() => { setBookTab("total"); setActiveKey(null); }}>总仓位</button>
+            {Array.from({ length: bookCount }, (_, index) => (
+              <button
+                key={index}
+                type="button"
+                role="tab"
+                aria-selected={bookTab === index}
+                onClick={() => { setBookTab(index); setActiveKey(null); }}
+              >
+                <span>{`仓位${index + 1}`}</span>
+                {entries[index] ? <small>{priceOf(entries[index].price, tick)}</small> : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {view ? <p className="summary">{summaryText(view)}</p> : null}
+        {opens.map((open) => (
+          <OpenPosition key={`${open.book || "仓位"}-${open.entry_ts}`} open={open} tick={tick} base={base} />
+        ))}
         {stats ? (
           <section className="stats">
             <Stat label="市值权益" value={money(stats.final_equity)} caption="最后一根收盘价下的账户价值" className="sand" />
-            <Stat label="已完成复利" value={money(stats.compounded_equity)} caption="已平仓周期连乘后的余额" className="sand" />
+            <Stat label="已完成复利" value={money(stats.compounded_equity)} caption={view.kind === "total" ? "每个仓位的已完成复利相加" : "已平仓周期连乘后的余额"} className="sand" />
             <Stat label="正常卖出" value={String(stats.completed)} caption={stats.avg_net_return == null ? "还没有完成的周期" : `单笔净利率 ${pct(stats.min_net_return)} 到 ${pct(stats.max_net_return)}`} />
             <Stat label="最长持仓" value={hold(stats.max_hold_hours)} caption={stats.avg_hold_hours == null ? "含未平仓的这一笔" : `已完成周期平均 ${hold(stats.avg_hold_hours)}`} />
-            <Stat label="收盘最大回撤" value={stats.max_drawdown ? `−${(stats.max_drawdown * 100).toFixed(2)}%` : "0.00%"} caption="按每根 K 线收盘时的市值，从高点回落的最大幅度" className="down" />
+            <Stat label="收盘最大回撤" value={stats.max_drawdown ? `−${(stats.max_drawdown * 100).toFixed(2)}%` : "0.00%"} caption={view.kind === "total" ? "各仓开出后才计入同一条权益曲线，从高点回落的最大幅度" : "按每根 K 线收盘时的市值，从高点回落的最大幅度"} className="down" />
             <Stat label="单笔最大浮亏" value={pct(stats.worst_mae)} caption="按持仓期间 K 线最低价估计" className="down" />
             <Stat label="手续费合计" value={money(stats.total_fees)} caption="开仓和平仓挂单费" />
             <Stat label="资金费收支" value={signedMoney(funding)} caption={funding < 0 ? "负数是净付出" : "正数是净收到"} className={tone(funding)} />
           </section>
         ) : null}
-        {data ? <Charts data={data} focus={focus} base={base} /> : null}
+        {view ? <Charts data={view} focus={focus} base={base} entries={entries} /> : null}
         {sample ? (
           <section className="panel">
             <h2>{sample.exit_ts ? "最近一笔完成的账" : "当前这笔的账"}</h2>
@@ -206,7 +277,7 @@ export default function ClockPage() {
         ) : null}
         <section className="panel">
           <div className="panel-head">
-            <h2>每个周期</h2>
+            <h2>{view?.kind === "total" ? "全部仓位的周期" : "每个周期"}</h2>
             <p>点一行，价格图会移到这笔的区间。时间是北京时间。</p>
           </div>
           <div className="table-wrap">
@@ -214,6 +285,7 @@ export default function ClockPage() {
               <thead>
                 <tr>
                   <th>#</th>
+                  {view?.kind === "total" ? <th>仓位</th> : null}
                   <th>开仓</th>
                   <th>平仓</th>
                   <th>开仓价</th>
@@ -233,6 +305,7 @@ export default function ClockPage() {
                   const rate = cycle.net_return == null ? marked / cycle.equity_before : cycle.net_return;
                   const cells = [
                     cycle.status === "open" ? "持仓" : String(index + 1),
+                    ...(view.kind === "total" ? [cycle.book || "仓位1"] : []),
                     formatTs(cycle.entry_ts),
                     cycle.exit_ts ? formatTs(cycle.exit_ts) : "未平",
                     priceOf(cycle.entry, tick),
@@ -245,10 +318,16 @@ export default function ClockPage() {
                     hold(cycle.hold_hours),
                     pct(cycle.mae_return),
                   ];
-                  const tones = { 5: marked, 6: rate, 8: cycle.funding, 11: cycle.mae_return };
+                  const shift = view.kind === "total" ? 1 : 0;
+                  const tones = {
+                    [5 + shift]: marked,
+                    [6 + shift]: rate,
+                    [8 + shift]: cycle.funding,
+                    [11 + shift]: cycle.mae_return,
+                  };
                   return (
                     <tr
-                      key={`${cycle.entry_ts}-${cycle.status}`}
+                      key={`${cycle.book || "仓位"}-${cycle.entry_ts}-${cycle.status}`}
                       className={[
                         cycle.status === "open" ? "open-row" : "",
                         cycle.status === "liquidated" ? "liq-row" : "",
@@ -270,7 +349,7 @@ export default function ClockPage() {
             </table>
           </div>
         </section>
-        {gridError ? <p className="warning">{gridError}</p> : <HeatGrid grid={grid} applied={data?.params} />}
+        {gridError ? <p className="warning">{gridError}</p> : <HeatGrid grid={grid} applied={data?.params} book={bookTab} />}
       </main>
     </div>
   );
@@ -288,6 +367,7 @@ function Stat({ label, value, caption, className }) {
 
 function OpenPosition({ open, tick, base }) {
   const gap = (open.target - open.last_price) / open.last_price;
+  const title = open.book ? `${open.book}还有一笔在持仓` : "有一笔还在持仓";
   const facts = [
     ["开仓", formatTs(open.entry_ts)],
     ["开仓价", priceOf(open.entry, tick)],
@@ -304,7 +384,7 @@ function OpenPosition({ open, tick, base }) {
   return (
     <section className="open">
       <div className="open-head">
-        <h2>有一笔还在持仓</h2>
+        <h2>{title}</h2>
         <p>{gap > 0 ? `最新价到卖单还差 ${(gap * 100).toFixed(2)}%` : "最新价已经在卖单之上，卖出留到下一根 K 线"}</p>
       </div>
       <dl className="facts">

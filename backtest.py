@@ -13,6 +13,10 @@
 早于 8:00 就从当天 8:00 开始。这段不足 10 根，或已经过了 20:00，就改到
 下一个北京日的 8:00 到 20:00。限价单同样不受这个时段限制。
 
+加仓不并进被套的那一笔。仓位1的持仓价相对这笔开仓价每再跌 10%，
+就用最初的起始资金另开一个独立账本，最多到跌 90%。新账本的第一笔按
+触发价成交，之后仍走原来的进场规则，并且自己复利。新账本再被套不再加仓。
+
 出场：卖出价让整笔账户在扣掉开平手续费和已发生资金费之后，净收益达到目标。
 价格向上取到最小报价单位。持仓期间不因下跌卖出。资金费结算后重算卖价。
 最高价触及卖价就按卖价成交。平仓后的现金是下一笔本金。
@@ -364,6 +368,7 @@ def run_backtest(
     tiers: list[tuple[float, float, float]] | None = None,
     record_curve: bool = True,
     entry_mode: str = "clock",
+    first_fill_price: float | None = None,
 ) -> BacktestResult:
     candles = sorted(
         (c for c in candles if c.o > 0 and c.h > 0 and c.l > 0 and c.c > 0),
@@ -402,6 +407,7 @@ def run_backtest(
     funding_index = 0
     peak = cash
     blocked = False
+    pending_fill = first_fill_price
     last_close = candles[0].c
 
     def maintenance(contracts: float) -> float:
@@ -570,7 +576,10 @@ def run_backtest(
             take_fundings(bar)
 
         if position is None and not just_closed and not blocked:
-            if entry_mode in ("secretary", "secretary2", "secretary3") and limit_price is not None:
+            if pending_fill is not None and bar.ts >= first_entry_ts:
+                open_position(pending_fill, "addon")
+                pending_fill = None
+            elif entry_mode in ("secretary", "secretary2", "secretary3") and limit_price is not None:
                 consider_secretary(bar)
             elif scheduled is not None:
                 if bar.ts > scheduled:

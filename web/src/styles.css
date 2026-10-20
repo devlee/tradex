@@ -79,6 +79,73 @@ body {
   background: var(--sand);
 }
 
+.book-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.book-tabs button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  margin: 0;
+  padding: 6px 12px;
+  color: var(--sand-2);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.book-tabs button small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.book-tabs button[aria-selected="true"] small {
+  color: #1a1408;
+}
+
+.entry-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.entry-marks li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.entry-marks i {
+  width: 10px;
+  height: 2px;
+  align-self: center;
+}
+
+.entry-marks strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.book-tabs button[aria-selected="true"] {
+  color: #1a1408;
+  background: var(--sand);
+  border-color: var(--sand);
+}
+
 .layout {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -386,8 +453,15 @@ tbody tr.liq-row { color: var(--down); }
 .heat td.current { outline: 2px solid #fff; outline-offset: -2px; }
 
 .secretary tr.mean td { font-weight: 600; }
-.secretary th:first-child, .secretary td:first-child { text-align: left; }
+.secretary th:first-child, .secretary td:first-child,
+.secretary th:nth-child(2), .secretary td:nth-child(2),
+.secretary th:nth-child(3), .secretary td:nth-child(3) { text-align: left; }
 .secretary td.heat-cell { font-variant-numeric: tabular-nums; }
+.secretary tr.foldable { cursor: pointer; }
+.secretary tr.foldable:hover, .secretary tr.foldable:focus { background: rgba(224, 177, 90, 0.08); outline: none; }
+.secretary tr.fold-row td { background: #141a16; }
+.secretary tr.fold-total td { font-weight: 600; background: #1c241e; }
+.secretary .fold-mark { display: inline-block; width: 1em; color: var(--sand); }
 
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }

@@ -18,6 +18,7 @@ from backtest import (
     target_price,
 )
 from okx_data import coin_spec
+from portfolio import addon_signals, run_positions
 
 TZ = timezone(timedelta(hours=8))
 QUARTER = 15 * 60 * 1000
@@ -506,6 +507,142 @@ class CoinCatalogTest(unittest.TestCase):
         self.assertEqual(spec["spot_id"], "HYPE-USDT")
         self.assertTrue(spec["swap_cache"].name.endswith("hype-usdt-swap-15m.json"))
         self.assertTrue(spec["spot_cache"].name.endswith("hype-usdt-spot-15m.json"))
+
+
+class AddonTest(unittest.TestCase):
+    def test_shallow_dip_does_not_open_another_book(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.2, 4.6, 5),
+            Candle(start + QUARTER, 5, 5.2, 4.6, 5),
+        ]
+        books = run_positions(candles, [], **self._params(start))
+        alone = run(candles)
+        self.assertEqual(len(books), 1)
+        self.assertEqual(books[0].compounded_equity, alone.compounded_equity)
+
+    def test_ten_percent_opens_one_new_book_at_the_threshold(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.05, 4.96, 5),
+            Candle(start + QUARTER, 4.6, 4.7, 4.4, 4.5),
+            Candle(start + 2 * QUARTER, 4.5, 4.55, 4.45, 4.5),
+        ]
+        signals = addon_signals(candles, run(candles))
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].level, 1)
+        self.assertAlmostEqual(signals[0].price, 4.5, places=6)
+        books = run_positions(candles, [], **self._params(start))
+        self.assertEqual(len(books), 2)
+        opened = books[1].open_cycle or books[1].cycles[0]
+        self.assertAlmostEqual(opened.entry, 4.5, places=6)
+        self.assertEqual(opened.equity_before, 10_000)
+        self.assertEqual(books[1].cycles[0].entry_kind if books[1].cycles else "addon", "addon")
+
+    def test_one_bar_can_open_two_books_and_a_gap_fills_at_the_open(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.05, 4.96, 5),
+            Candle(start + QUARTER, 3.8, 3.9, 3.7, 3.85),
+            Candle(start + 2 * QUARTER, 3.85, 3.9, 3.8, 3.85),
+        ]
+        signals = addon_signals(candles, run(candles))
+        self.assertEqual([signal.level for signal in signals], [1, 2])
+        self.assertAlmostEqual(signals[0].price, 3.8, places=6)
+        self.assertAlmostEqual(signals[1].price, 3.8, places=6)
+        self.assertEqual(len(run_positions(candles, [], **self._params(start))), 3)
+
+    def test_two_thresholds_on_one_bar_keep_their_own_prices(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.05, 4.96, 5),
+            Candle(start + QUARTER, 4.6, 4.65, 3.9, 4.0),
+            Candle(start + 2 * QUARTER, 4.0, 4.05, 3.95, 4.0),
+        ]
+        signals = addon_signals(candles, run(candles))
+        self.assertEqual(len(signals), 2)
+        self.assertAlmostEqual(signals[0].price, 4.5, places=6)
+        self.assertAlmostEqual(signals[1].price, 4.0, places=6)
+
+    def test_entry_bar_wick_can_open_the_next_book(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.2, 4.4, 5),
+            Candle(start + QUARTER, 5, 5.1, 4.9, 5),
+        ]
+        signals = addon_signals(candles, run(candles))
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].ts, start)
+        books = run_positions(candles, [], **self._params(start))
+        opened = books[1].open_cycle or books[1].cycles[0]
+        self.assertEqual(opened.entry_ts, start)
+        self.assertAlmostEqual(opened.entry, 4.5, places=6)
+
+    def test_new_book_uses_base_equity_after_the_first_book_compounds(self):
+        start = bj(2026, 3, 13)
+        reopen = bj(2026, 3, 15)
+        candles = [
+            Candle(start, 5, 5.05, 4.96, 5),
+            Candle(start + QUARTER, 5.2, 6, 5, 5.5),
+            Candle(reopen, 5, 5.05, 4.96, 5),
+            Candle(reopen + QUARTER, 4.6, 4.7, 4.4, 4.5),
+            Candle(reopen + 2 * QUARTER, 4.5, 4.55, 4.45, 4.5),
+        ]
+        books = run_positions(candles, [], **self._params(start))
+        self.assertEqual(len(books), 2)
+        self.assertGreater(books[0].open_cycle.equity_before, 10_000)
+        self.assertEqual(books[1].open_cycle.equity_before, 10_000)
+        self.assertGreater(books[1].open_cycle.contracts, 0)
+
+    def test_drop_from_the_addon_price_does_not_open_another_book(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 10, 10.1, 9.5, 10),
+            Candle(start + QUARTER, 9.2, 9.3, 8.1, 8.2),
+            Candle(start + 2 * QUARTER, 8.15, 8.2, 8.1, 8.12),
+        ]
+        books = run_positions(candles, [], **self._params(start))
+        self.assertEqual(len(books), 2)
+        opened = books[1].open_cycle or books[1].cycles[0]
+        self.assertAlmostEqual(opened.entry, 9, places=6)
+
+    def test_addon_book_does_not_spawn_another_book(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.05, 4.96, 5),
+            Candle(start + QUARTER, 4.6, 4.7, 4.4, 4.5),
+            Candle(start + 2 * QUARTER, 5.2, 6, 5, 5.5),
+            Candle(start + 3 * QUARTER, 3.2, 3.3, 3.0, 3.1),
+        ]
+        books = run_positions(candles, [], **self._params(start))
+        self.assertEqual(len(books), 2)
+        opened = books[1].open_cycle or books[1].cycles[0]
+        self.assertAlmostEqual(opened.entry, 4.5, places=6)
+
+    def test_first_fill_price_replaces_only_the_first_open(self):
+        start = bj(2026, 3, 13)
+        candles = [
+            Candle(start, 5, 5.05, 4.9, 5),
+            Candle(start + QUARTER, 4.8, 6, 4.7, 5.5),
+        ]
+        result = run(candles, first_fill_price=4.5)
+        self.assertEqual(result.cycles[0].entry_kind, "addon")
+        self.assertAlmostEqual(result.cycles[0].entry, 4.5, places=6)
+
+    def _params(self, start):
+        return dict(
+            initial_equity=10_000,
+            net_target=0.02,
+            fee_rate=0.0002,
+            bar_ms=QUARTER,
+            ct_val=10,
+            lot_sz=0.1,
+            min_sz=0.1,
+            tick_sz=0.001,
+            mmr=0.01,
+            first_entry_ts=start,
+            entry_hour=0,
+        )
 
 
 if __name__ == "__main__":
