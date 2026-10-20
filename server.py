@@ -14,8 +14,10 @@ from urllib.parse import parse_qs, urlparse
 from backtest import fill_missing_funding, run_backtest
 from okx_data import (
     BAR_MS,
+    COINS,
     SHANGHAI,
     candles_from,
+    coin_spec,
     fundings_from,
     load_market,
     missing_bars,
@@ -90,7 +92,9 @@ def build_result(
     fee_rate: float,
     start: str,
     entry_hour: int,
+    coin: str = "NEAR",
 ) -> dict:
+    spec = coin_spec(coin)
     try:
         day = datetime.fromisoformat(start)
     except ValueError as error:
@@ -109,7 +113,7 @@ def build_result(
     day_start = int(day.replace(tzinfo=SHANGHAI).timestamp() * 1000)
     first_entry = day_start + entry_hour * 3_600_000
     with LOAD_LOCK:
-        payload = load_market(day_start)
+        payload = load_market(day_start, coin=spec["base"])
     candles = [candle for candle in candles_from(payload) if candle.ts >= day_start]
     observed = [item for item in fundings_from(payload) if item.ts >= day_start]
     if len(candles) < 2:
@@ -166,9 +170,12 @@ def build_result(
     if result.open_cycle is not None:
         markers.append([result.open_cycle.entry_ts, "buy", _num(result.open_cycle.entry)])
 
+    rules = list(RULES)
+    rules[0] = f"{spec['base']}-USDT 永续，1 倍，只做多，一次只持有一笔。K 线是 15 分钟。"
     return {
-        "rules": RULES,
+        "rules": rules,
         "market": {
+            "coin": spec["base"],
             "inst_id": payload["inst_id"],
             "bar": "15m",
             "start": candles[0].ts,
@@ -191,6 +198,7 @@ def build_result(
             "start": start,
             "entry_hour": entry_hour,
             "entry_delay_days": 2,
+            "coin": spec["base"],
         },
         "stats": {
             "completed": len(normal),
@@ -247,6 +255,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self._json(200, {"ok": True})
                 return
+            if parsed.path == "/api/coins":
+                self._json(200, {"coins": [spec["base"] for spec in COINS.values()]})
+                return
             if parsed.path == "/api/backtest":
                 query = parse_qs(parsed.query)
                 equity = float(query.get("equity", ["10000"])[0])
@@ -254,7 +265,8 @@ class Handler(BaseHTTPRequestHandler):
                 fee_rate = float(query.get("fee", ["0.0002"])[0])
                 start = query.get("start", ["2026-03-13"])[0]
                 entry_hour = int(query.get("hour", ["0"])[0])
-                self._json(200, build_result(equity, net_target, fee_rate, start, entry_hour))
+                coin = query.get("coin", ["NEAR"])[0]
+                self._json(200, build_result(equity, net_target, fee_rate, start, entry_hour, coin))
                 return
             self._file(parsed.path)
         except ValueError as error:

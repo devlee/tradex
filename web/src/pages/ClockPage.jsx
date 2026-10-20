@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Charts from "../components/Charts";
 import HeatGrid from "../components/HeatGrid";
+import { bookUrl, useCoin } from "../coin";
 import {
   formatTs,
   hold,
@@ -56,51 +57,70 @@ function summaryText(data) {
 }
 
 export default function ClockPage() {
+  const { coin } = useCoin();
   const [form, setForm] = useState(INITIAL_FORM);
+  const formRef = useRef(form);
+  formRef.current = form;
   const [data, setData] = useState(null);
   const [grid, setGrid] = useState(null);
   const [gridError, setGridError] = useState("");
   const [status, setStatus] = useState("正在准备行情。");
   const [running, setRunning] = useState(false);
   const [activeKey, setActiveKey] = useState(null);
+  const requestId = useRef(0);
 
-  async function loadBacktest(nextForm) {
+  async function loadBacktest(nextForm, nextCoin) {
+    const id = ++requestId.current;
     const equity = nextForm.equity;
     const net = Number(nextForm.net) / 100;
     const fee = Number(nextForm.fee) / 100;
     const { start, hour } = nextForm;
     setRunning(true);
-    setStatus("正在读取 NEAR 永续 15 分钟行情并重放规则。第一次会从 2026-03-13 下载到现在。");
+    setStatus(`正在读取本地的 ${nextCoin} 永续 15 分钟行情并重放规则。`);
     try {
-      const response = await fetch(`/api/backtest?equity=${encodeURIComponent(equity)}&net=${encodeURIComponent(net)}&fee=${encodeURIComponent(fee)}&start=${encodeURIComponent(start)}&hour=${encodeURIComponent(hour)}`);
+      const response = await fetch(`/api/backtest?equity=${encodeURIComponent(equity)}&net=${encodeURIComponent(net)}&fee=${encodeURIComponent(fee)}&start=${encodeURIComponent(start)}&hour=${encodeURIComponent(hour)}&coin=${encodeURIComponent(nextCoin)}`);
       const payload = await response.json();
+      if (id !== requestId.current) return;
       if (!response.ok) throw new Error(payload.error || "回测失败");
       setData(payload);
       setActiveKey(null);
-      setStatus("回测完成。这是历史行情的重放，用来观察这条规则，不是对以后收益的预测。");
+      setStatus("回测完成。这是本地行情的重放，用来观察这条规则，不是对以后收益的预测。");
     } catch (error) {
+      if (id !== requestId.current) return;
+      setData(null);
       setStatus(error.message || "回测失败");
     } finally {
-      setRunning(false);
+      if (id === requestId.current) setRunning(false);
     }
   }
 
   useEffect(() => {
-    loadBacktest(INITIAL_FORM);
-    fetch("/grid.json")
+    let cancelled = false;
+    loadBacktest(formRef.current, coin);
+    setGrid(null);
+    setGridError("");
+    fetch(bookUrl(coin, "grid.json"))
       .then((response) => {
         if (!response.ok) throw new Error("复利表没有读到");
         return response.json();
       })
-      .then(setGrid)
-      .catch((error) => setGridError(error.message || "复利表没有读到"));
-  }, []);
+      .then((payload) => {
+        if (!cancelled) setGrid(payload);
+      })
+      .catch((error) => {
+        if (!cancelled) setGridError(error.message || "复利表没有读到");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [coin]);
 
   function update(event) {
     const { name, value } = event.target;
     setForm((current) => ({ ...current, [name]: value }));
   }
 
+  const base = data?.market.coin || coin;
   const stats = data?.stats;
   const tick = data?.market.tick_sz ?? 0.001;
   const targetText = data
@@ -122,17 +142,17 @@ export default function ClockPage() {
   return (
     <div className="layout">
       <aside>
-        <h1>NEAR 永续<br /><span>{targetText}%</span> 净收益周期</h1>
+        <h1>{base} 永续<br /><span>{targetText}%</span> 净收益周期</h1>
         <p className="lede">用 15 分钟 K 线重放：在指定钟点的开盘价买入，净赚到目标就卖，没赚到就继续拿着，卖完用新的余额做下一笔。</p>
         <ol className="rules">
-          {(data?.rules || RULES).map((rule) => <li key={rule}>{rule}</li>)}
+          {(data?.rules || RULES).map((rule) => <li key={rule}>{rule.replaceAll("NEAR", base)}</li>)}
         </ol>
         <details className="formula">
           <summary>卖出价怎么算</summary>
           <p>卖出价 = ［开仓价 × (1 + 费率) + (净目标金额 − 资金费收支) / 持仓数量］ / (1 − 费率)，再向上取到报价步进。</p>
           <p>净目标金额 = 开仓前权益 × 净目标。资金费收支为正表示已经收到，为负表示已经付出。</p>
         </details>
-        <form onSubmit={(event) => { event.preventDefault(); loadBacktest(form); }}>
+        <form onSubmit={(event) => { event.preventDefault(); loadBacktest(form, coin); }}>
           <label>起始资金（USDT）
             <input name="equity" type="number" min="10" step="1" value={form.equity} onChange={update} />
           </label>
@@ -152,7 +172,7 @@ export default function ClockPage() {
           <p className="hint">K 线固定为 15 分钟。例如 3 月 13 日平仓、钟点为 0，下一笔就在 3 月 15 日 0 点那根 K 线的开盘价买入。费率按页面上的数字计，默认 0.02%。</p>
         </form>
         {data ? (
-          <p className="spec">合约 {data.market.inst_id}，1 张 = {data.market.ct_val} NEAR，最小 {data.market.lot_sz} 张，报价步进 {data.market.tick_sz}。小仓位维持保证金 {(data.market.mmr * 100).toFixed(2)}%。行情更新于 {formatTs(data.market.fetched_at)}。</p>
+          <p className="spec">合约 {data.market.inst_id}，1 张 = {data.market.ct_val} {base}，最小 {data.market.lot_sz} 张，报价步进 {data.market.tick_sz}。小仓位维持保证金 {(data.market.mmr * 100).toFixed(2)}%。行情文件更新于 {formatTs(data.market.fetched_at)}。</p>
         ) : null}
       </aside>
       <main>
@@ -160,7 +180,7 @@ export default function ClockPage() {
         {data?.market.warnings.map((text) => <p className="warning" key={text}>{text}</p>)}
         {stats?.note ? <p className="warning">{stats.note}</p> : null}
         {data ? <p className="summary">{summaryText(data)}</p> : null}
-        {data?.open_cycle ? <OpenPosition open={data.open_cycle} tick={tick} /> : null}
+        {data?.open_cycle ? <OpenPosition open={data.open_cycle} tick={tick} base={base} /> : null}
         {stats ? (
           <section className="stats">
             <Stat label="市值权益" value={money(stats.final_equity)} caption="最后一根收盘价下的账户价值" className="sand" />
@@ -173,14 +193,14 @@ export default function ClockPage() {
             <Stat label="资金费收支" value={signedMoney(funding)} caption={funding < 0 ? "负数是净付出" : "正数是净收到"} className={tone(funding)} />
           </section>
         ) : null}
-        {data ? <Charts data={data} focus={focus} /> : null}
+        {data ? <Charts data={data} focus={focus} base={base} /> : null}
         {sample ? (
           <section className="panel">
             <h2>{sample.exit_ts ? "最近一笔完成的账" : "当前这笔的账"}</h2>
             <p className="explain">
               {sample.exit_ts
-                ? `开仓前权益 ${money(sample.equity_before)} USDT，买入 ${sample.coin_qty} NEAR，价格 ${priceOf(sample.entry, tick)}。卖出价格 ${priceOf(sample.exit_price, tick)}。手续费 ${money(sample.fees)} USDT，资金费 ${signedMoney(sample.funding)} USDT。结束后权益 ${money(sample.equity_after)} USDT，净利率 ${pct(sample.net_return)}。`
-                : `开仓前权益 ${money(sample.equity_before)} USDT，买入 ${sample.coin_qty} NEAR，价格 ${priceOf(sample.entry, tick)}。当前目标卖价 ${priceOf(sample.target, tick)}。已经付出开仓手续费 ${money(sample.fees)} USDT，资金费 ${signedMoney(sample.funding)} USDT。按最新价算，这笔市值是 ${money(sample.equity)} USDT。`}
+                ? `开仓前权益 ${money(sample.equity_before)} USDT，买入 ${sample.coin_qty} ${base}，价格 ${priceOf(sample.entry, tick)}。卖出价格 ${priceOf(sample.exit_price, tick)}。手续费 ${money(sample.fees)} USDT，资金费 ${signedMoney(sample.funding)} USDT。结束后权益 ${money(sample.equity_after)} USDT，净利率 ${pct(sample.net_return)}。`
+                : `开仓前权益 ${money(sample.equity_before)} USDT，买入 ${sample.coin_qty} ${base}，价格 ${priceOf(sample.entry, tick)}。当前目标卖价 ${priceOf(sample.target, tick)}。已经付出开仓手续费 ${money(sample.fees)} USDT，资金费 ${signedMoney(sample.funding)} USDT。按最新价算，这笔市值是 ${money(sample.equity)} USDT。`}
             </p>
           </section>
         ) : null}
@@ -266,12 +286,12 @@ function Stat({ label, value, caption, className }) {
   );
 }
 
-function OpenPosition({ open, tick }) {
+function OpenPosition({ open, tick, base }) {
   const gap = (open.target - open.last_price) / open.last_price;
   const facts = [
     ["开仓", formatTs(open.entry_ts)],
     ["开仓价", priceOf(open.entry, tick)],
-    ["数量", `${open.coin_qty} NEAR`],
+    ["数量", `${open.coin_qty} ${base}`],
     ["当前卖价", priceOf(open.target, tick), "sand"],
     ["最新价", priceOf(open.last_price, tick)],
     ["浮动盈亏", signedMoney(open.upl), tone(open.upl)],

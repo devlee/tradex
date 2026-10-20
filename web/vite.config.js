@@ -15,6 +15,8 @@ export default defineConfig({
       "/secretary2-spot.json": "http://127.0.0.1:8787",
       "/secretary3.json": "http://127.0.0.1:8787",
       "/secretary3-spot.json": "http://127.0.0.1:8787",
+      "/pump": "http://127.0.0.1:8787",
+      "/hype": "http://127.0.0.1:8787",
     },
   },
 });

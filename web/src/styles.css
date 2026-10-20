@@ -42,6 +42,30 @@ body {
   gap: 8px;
 }
 
+.nav-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.coin-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-family: "Avenir Next", "PingFang SC", sans-serif;
+  font-size: 14px;
+}
+
+.coin-switch select {
+  color: var(--sand);
+  background: #1c221e;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font: inherit;
+}
+
 .topnav a {
   color: var(--muted);
   text-decoration: none;

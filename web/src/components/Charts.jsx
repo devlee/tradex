@@ -32,7 +32,7 @@ function chartOptions() {
   };
 }
 
-export default function Charts({ data, focus }) {
+export default function Charts({ data, focus, base = "价格" }) {
   const priceHost = useRef(null);
   const equityHost = useRef(null);
   const api = useRef(null);
@@ -124,7 +124,7 @@ export default function Charts({ data, focus }) {
           <h2>价格和成交</h2>
           <p>绿箭头是买入，金色箭头是按目标卖出。</p>
         </div>
-        <div ref={priceHost} className="chart chart-price" aria-label="NEAR 价格与买卖点" />
+        <div ref={priceHost} className="chart chart-price" aria-label={`${base} 价格与买卖点`} />
       </section>
       <section className="panel">
         <div className="panel-head">

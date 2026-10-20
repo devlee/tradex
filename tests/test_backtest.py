@@ -17,6 +17,7 @@ from backtest import (
     size_contracts,
     target_price,
 )
+from okx_data import coin_spec
 
 TZ = timezone(timedelta(hours=8))
 QUARTER = 15 * 60 * 1000
@@ -483,6 +484,28 @@ class SecretaryImmediateTest(unittest.TestCase):
         self.assertEqual(result.open_cycle.entry_ts, touch)
         self.assertEqual(result.open_cycle.entry, 4.8)
         self.assertEqual(result.entries_limit, 1)
+
+
+class CoinCatalogTest(unittest.TestCase):
+    def test_unknown_coin_is_rejected(self):
+        with self.assertRaises(ValueError):
+            coin_spec("DOGE")
+
+    def test_pump_has_its_own_local_files(self):
+        spec = coin_spec("pump")
+        self.assertEqual(spec["base"], "PUMP")
+        self.assertEqual(spec["swap_id"], "PUMP-USDT-SWAP")
+        self.assertEqual(spec["spot_id"], "PUMP-USDT")
+        self.assertTrue(spec["swap_cache"].name.endswith("pump-usdt-swap-15m.json"))
+        self.assertTrue(spec["spot_cache"].name.endswith("pump-usdt-spot-15m.json"))
+
+    def test_hype_has_its_own_local_files(self):
+        spec = coin_spec("hype")
+        self.assertEqual(spec["base"], "HYPE")
+        self.assertEqual(spec["swap_id"], "HYPE-USDT-SWAP")
+        self.assertEqual(spec["spot_id"], "HYPE-USDT")
+        self.assertTrue(spec["swap_cache"].name.endswith("hype-usdt-swap-15m.json"))
+        self.assertTrue(spec["spot_cache"].name.endswith("hype-usdt-spot-15m.json"))
 
 
 if __name__ == "__main__":
