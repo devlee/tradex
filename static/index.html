@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NEAR 周期回测</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <p class="eyebrow">OKX 公开行情 · 本地重放 · 不下真实单</p>
+      <h1>NEAR 永续<br /><span id="target-label">2%</span> 净收益周期</h1>
+      <p class="lede">用 15 分钟 K 线重放：在指定钟点的开盘价买入，净赚到目标就卖，没赚到就继续拿着，卖完用新的余额做下一笔。</p>
+      <ol class="rules" id="rules">
+        <li>NEAR-USDT 永续，1 倍，只做多，一次只持有一笔。K 线是 15 分钟。</li>
+        <li>第一笔在起点日期的进场钟点买入，价格是那根 15 分钟 K 线的开盘价。</li>
+        <li>之后每一笔，在上一笔平仓日（北京时间）之后的第 2 天、同一个钟点的开盘价买入。</li>
+        <li>进场钟点可以改，范围是 0 点到 23 点，每次 1 小时。</li>
+        <li>卖出价按整笔资金的净目标反推。开仓、平仓手续费和已经结算的资金费都算进去，再向上对齐到最小报价单位。</li>
+        <li>持仓以后不因为下跌卖出。每 8 小时资金费结算后重算卖价。这根 K 线的最高价碰到卖价，就按卖价成交。卖出后的余额是下一笔本金。</li>
+      </ol>
+      <details class="formula">
+        <summary>卖出价怎么算</summary>
+        <p>卖出价 = ［开仓价 × (1 + 费率) + (净目标金额 − 资金费收支) / 持仓数量］ / (1 − 费率)，再向上取到报价步进。</p>
+        <p>净目标金额 = 开仓前权益 × 净目标。资金费收支为正表示已经收到，为负表示已经付出。</p>
+      </details>
+      <form id="controls">
+        <label>起始资金（USDT）
+          <input id="equity" type="number" min="10" step="1" value="10000" />
+        </label>
+        <label>单周期净目标（%）
+          <input id="net" type="number" min="0.1" max="50" step="0.1" value="2" />
+        </label>
+        <label>挂单费率（%）
+          <input id="fee" type="number" min="0" max="1" step="0.01" value="0.02" />
+        </label>
+        <label>起点日期
+          <input id="start" type="date" value="2026-03-13" required />
+        </label>
+        <label>进场钟点（北京时间）
+          <input id="hour" type="number" min="0" max="23" step="1" value="0" />
+        </label>
+        <button id="run" type="submit">重新回测</button>
+        <p class="hint">K 线固定为 15 分钟。例如 3 月 13 日平仓、钟点为 0，下一笔就在 3 月 15 日 0 点那根 K 线的开盘价买入。费率按页面上的数字计，默认 0.02%。</p>
+      </form>
+      <p class="spec" id="spec"></p>
+    </aside>
+    <main>
+      <p id="status" role="status">正在准备行情。</p>
+      <section id="warnings"></section>
+      <p id="summary" class="summary"></p>
+      <section id="open" class="open" hidden></section>
+      <section id="stats" class="stats"></section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>价格和成交</h2>
+          <p>绿箭头是买入，金色箭头是按目标卖出。</p>
+        </div>
+        <div id="price-chart" class="chart chart-price" aria-label="NEAR 价格与买卖点"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>账户权益</h2>
+          <p>金色是市值权益，含浮动盈亏。灰色是现金余额，不含浮动盈亏。两条线重合时是空仓。</p>
+        </div>
+        <div id="equity-chart" class="chart chart-equity" aria-label="市值权益与现金余额"></div>
+      </section>
+      <section class="panel" id="explain" hidden></section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>每个周期</h2>
+          <p>点一行，价格图会移到这笔的区间。时间是北京时间。</p>
+        </div>
+        <div class="table-wrap">
+          <table class="cycles">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>开仓</th>
+                <th>平仓</th>
+                <th>开仓价</th>
+                <th>卖出价</th>
+                <th>净收益</th>
+                <th>净利率</th>
+                <th>结束后权益</th>
+                <th>资金费</th>
+                <th>手续费</th>
+                <th>持仓</th>
+                <th>最大浮亏</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>已完成复利</h2>
+          <p id="grid-note">横轴是单周期净目标，纵轴是北京时间进场钟点。</p>
+        </div>
+        <div class="table-wrap heat-wrap">
+          <table class="heat">
+            <thead id="grid-head"></thead>
+            <tbody id="grid-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
