@@ -310,6 +310,81 @@ class SecretaryTest(unittest.TestCase):
         self.assertEqual(result.entries_secretary_last, 1)
         self.assertEqual(result.entries_secretary, 0)
 
+    def test_spot_balance_is_not_liquidated_without_funding(self):
+        start = bj(2026, 3, 13)
+        result = run(
+            [
+                Candle(start, 5, 5.02, 0.5, 5),
+                Candle(start + QUARTER, 5, 5.05, 0.4, 4.8),
+            ],
+            fee_rate=0.0008,
+            ct_val=1,
+            lot_sz=1e-8,
+            min_sz=1,
+            mmr=1,
+        )
+        self.assertEqual(result.liquidations, 0)
+        self.assertEqual(result.total_funding, 0)
+        self.assertGreater(result.open_cycle.coin_qty, 1900)
+        self.assertLess(result.open_cycle.coin_qty, 2000)
+
+
+class SecretaryDayTest(unittest.TestCase):
+    def _until(self, start, day):
+        candles = [
+            Candle(start, 5, 5.02, 4.99, 5),
+            Candle(start + QUARTER, 5.05, 5.2, 5.04, 5.1),
+        ]
+        ts = start + 2 * QUARTER
+        while ts < day:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        return candles
+
+    def test_window_rejects_eighteen_of_forty_nine_bars(self):
+        self.assertEqual(secretary_reject_count(QUARTER, 49), 18)
+
+    def test_limit_still_fills_outside_the_daytime_window(self):
+        start = bj(2026, 3, 13)
+        candles = self._until(start, bj(2026, 3, 15, 3))
+        touch = bj(2026, 3, 15, 3)
+        candles.append(Candle(touch, 4.8, 4.9, 4.7, 4.75))
+        result = run(candles, entry_mode="secretary2")
+        self.assertEqual(result.open_cycle.entry_ts, touch)
+        self.assertEqual(result.open_cycle.entry, 4.8)
+        self.assertEqual(result.entries_limit, 1)
+
+    def test_bars_before_eight_and_the_sample_do_not_buy(self):
+        start = bj(2026, 3, 13)
+        day = bj(2026, 3, 15)
+        candles = self._until(start, day + 8 * 3_600_000)
+        for slot in range(18):
+            candles.append(above_limit(day + 8 * 3_600_000 + slot * QUARTER))
+        result = run(candles, entry_mode="secretary2")
+        self.assertIsNone(result.open_cycle)
+
+    def test_first_open_under_the_daytime_sample_buys(self):
+        start = bj(2026, 3, 13)
+        day = bj(2026, 3, 15)
+        candles = self._until(start, day + 8 * 3_600_000)
+        for slot in range(18):
+            candles.append(above_limit(day + 8 * 3_600_000 + slot * QUARTER))
+        signal = day + 8 * 3_600_000 + 18 * QUARTER
+        candles.append(Candle(signal, 5.8, 5.9, 5.5, 5.85))
+        result = run(candles, entry_mode="secretary2")
+        self.assertEqual(result.open_cycle.entry_ts, signal)
+        self.assertEqual(result.open_cycle.entry, 5.8)
+        self.assertEqual(result.entries_secretary, 1)
+
+    def test_eight_pm_bar_is_bought_when_nothing_is_cheaper(self):
+        start = bj(2026, 3, 13)
+        end = bj(2026, 3, 15, 20)
+        candles = self._until(start, end + QUARTER)
+        result = run(candles, entry_mode="secretary2")
+        self.assertEqual(result.open_cycle.entry_ts, end)
+        self.assertEqual(result.open_cycle.entry, 6)
+        self.assertEqual(result.entries_secretary_last, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
