@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+import time
 import traceback
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +27,7 @@ from okx_data import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
+DEMO_STATUS = ROOT / "data" / "demo-status.json"
 LOAD_LOCK = threading.Lock()
 
 RULES = [
@@ -37,6 +39,26 @@ RULES = [
     "持仓以后不因为下跌卖出。每 8 小时资金费结算后重算卖价。这根 K 线的最高价碰到卖价，就按卖价成交。卖出后的余额是下一笔本金。",
     "下跌幅度只按仓位1这笔的开仓价计算，每再跌 10% 就用最初的起始资金新开仓位2、仓位3，最多到跌 90%。仓位2再跌 10% 也不会再开新仓。新仓不并进被套的那一笔，之后自己复利。",
 ]
+
+
+def demo_status() -> dict:
+    if not DEMO_STATUS.is_file():
+        return {
+            "running": False,
+            "simulated": True,
+            "phase": "down",
+            "phase_text": "模拟单程序没有在跑。在项目目录执行 python3 demo_runner.py。",
+            "inst_id": "NEAR-USDT-SWAP",
+            "strategy": "秘书问题4",
+            "note": "进程开着就一直轮询，关掉进程就停止下单。",
+        }
+    payload = json.loads(DEMO_STATUS.read_text())
+    age = time.time() * 1000 - float(payload.get("heartbeat") or 0)
+    payload["running"] = age < 20_000
+    if not payload["running"]:
+        payload["phase"] = "down"
+        payload["phase_text"] = "模拟单程序已停止。重新执行 python3 demo_runner.py 才会继续下单。"
+    return payload
 
 
 def _num(value, digits=8):
@@ -390,6 +412,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/coins":
                 self._json(200, {"coins": [spec["base"] for spec in COINS.values()]})
+                return
+            if parsed.path == "/api/demo":
+                self._json(200, demo_status())
                 return
             if parsed.path == "/api/backtest":
                 query = parse_qs(parsed.query)

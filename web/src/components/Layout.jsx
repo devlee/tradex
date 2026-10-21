@@ -15,6 +15,7 @@ export default function Layout() {
             <NavLink to="/secretary-2">秘书问题2</NavLink>
             <NavLink to="/secretary-3">秘书问题3</NavLink>
             <NavLink to="/secretary-4">秘书问题4</NavLink>
+            <NavLink to="/demo">模拟单</NavLink>
           </nav>
           <label className="coin-switch">
             币种

@@ -263,6 +263,19 @@ main { min-width: 0; }
   color: var(--sand-2);
 }
 
+.demo-live {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(47, 158, 68, 0.12);
+  color: var(--text);
+}
+
+.note, .footnote {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .warning {
   margin: 0 0 8px;
   padding: 10px 12px;

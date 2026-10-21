@@ -6,6 +6,7 @@ import SecretaryPage from "./pages/SecretaryPage";
 import Secretary2Page from "./pages/Secretary2Page";
 import Secretary3Page from "./pages/Secretary3Page";
 import Secretary4Page from "./pages/Secretary4Page";
+import DemoPage from "./pages/DemoPage";
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="secretary-2" element={<Secretary2Page />} />
         <Route path="secretary-3" element={<Secretary3Page />} />
         <Route path="secretary-4" element={<Secretary4Page />} />
+        <Route path="demo" element={<DemoPage />} />
       </Route>
     </Routes>
   );
