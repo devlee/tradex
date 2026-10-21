@@ -1,8 +1,8 @@
-"""秘书问题4的 OKX 模拟盘程序。一直轮询，直到进程被关掉。
+"""秘书问题4的 OKX 实盘程序。一直轮询，直到进程被关掉。
 
-只做 NEAR-USDT-SWAP 多单，1 倍全仓。第一笔不等到下一个 0 点，启动后立即市价开仓。
-平仓后立刻在这一笔的开仓价挂限价买单，并从下一根起用 32 根秘书窗口选点。
-5 分钟下这 32 根是 2 小时 40 分。净目标 2%。
+只做 NEAR-USDT-SWAP 多单，1 倍全仓。请求不带模拟盘标记。
+必须设置 OKX_LIVE=1 才会连接账户。必须再设置 OKX_ARM=1 才会开第一笔。
+模拟盘的 data/demo-state.json 不会被读取。
 第一笔只用 10,000 USDT。平仓后这笔账上的余额才是下一笔本金。
 """
 
@@ -25,13 +25,13 @@ from backtest import (
     target_price,
 )
 from okx_data import SHANGHAI
-from okx_demo import DemoClient, OkxError, public_get
+from okx_demo import LiveClient, OkxError, public_get
 import telegram_notice as tg
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
-STATE_PATH = DATA / "demo-state.json"
-STATUS_PATH = DATA / "demo-status.json"
+STATE_PATH = DATA / "live-state.json"
+STATUS_PATH = DATA / "live-status.json"
 INST_ID = "NEAR-USDT-SWAP"
 FEE_RATE = 0.0002
 NET_TARGET = 0.02
@@ -87,7 +87,8 @@ def write_json(path: Path, payload: dict) -> None:
 
 def fresh_state(now_ms: int) -> dict:
     return {
-        "phase": "wait_clock",
+        "phase": "standby",
+        "trading": "live",
         "scheduled": next_entry_bar(now_ms),
         "limit_price": None,
         "secretary_start": None,
@@ -108,8 +109,9 @@ def fresh_state(now_ms: int) -> dict:
 
 class Runner:
     def __init__(self) -> None:
-        self.client: DemoClient | None = None
+        self.client: LiveClient | None = None
         self.spec = {"ct_val": 10.0, "lot_sz": 0.1, "min_sz": 0.1, "tick_sz": 0.001}
+        self._block_save = False
         self.state = self._load_state()
         self.equity = None
         self.available = None
@@ -125,11 +127,21 @@ class Runner:
             saved = json.loads(STATE_PATH.read_text())
         except json.JSONDecodeError:
             return fresh_state(now_ms)
+        if saved.get("trading") != "live":
+            self._block_save = True
+            locked = fresh_state(now_ms)
+            locked["phase"] = "live_locked"
+            locked["last_error"] = "live-state.json 不是实盘账本，已停止下单，文件保持原样。"
+            return locked
         base = fresh_state(now_ms)
         base.update(saved)
+        base["trading"] = "live"
         return base
 
     def save(self) -> None:
+        if self._block_save:
+            self.publish()
+            return
         write_json(STATE_PATH, self.state)
         self.publish()
 
@@ -138,7 +150,8 @@ class Runner:
         slot = self._slot()
         write_json(STATUS_PATH, {
             "heartbeat": int(time.time() * 1000),
-            "simulated": True,
+            "simulated": False,
+            "trading": "live",
             "inst_id": INST_ID,
             "strategy": "秘书问题4",
             "bar": BAR,
@@ -162,13 +175,17 @@ class Runner:
             "cycles": (self.state.get("cycles") or [])[:20],
             "last_error": self.state.get("last_error") or "",
             "telegram": tg.configured(),
-            "note": "模拟盘。第一笔本金 10,000 USDT，之后只用这笔账的平仓余额。进程开着就一直轮询。",
+            "note": "实盘。未设置 OKX_ARM=1 时不会开第一笔。第一笔本金 10,000 USDT。",
         })
 
     def phase_text(self, slot: int | None) -> str:
         phase = self.state.get("phase")
+        if phase == "live_locked":
+            return "未设置 OKX_LIVE=1。实盘进程不会连接账户，也不会下单。"
         if phase == "missing_keys":
-            return "还没有模拟盘钥匙。把 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE 写进项目根目录的 .env。"
+            return "还没有实盘钥匙。把 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE 写进 .env，并设置 OKX_LIVE=1。"
+        if phase == "standby":
+            return "实盘已连接，还没有开第一笔。设置 OKX_ARM=1 后才会按市价开仓。"
         if phase == "wait_clock":
             return "正在按市价开第一笔，本金 10,000 USDT。"
         if phase == "long" and self.state.get("position"):
@@ -183,7 +200,7 @@ class Runner:
             if slot < (self.state.get("reject_bars") or 0):
                 return f"空仓。限价单挂着，正在观察第 {slot + 1} 根，样本最低开盘 {self.state.get('sample_min') or '—'}。"
             return f"空仓。观察结束，正在第 {slot + 1} 根里等更低的开盘价，限价单仍然优先。"
-        return "正在同步模拟盘。"
+        return "正在同步实盘。"
 
     def _purpose_text(self, purpose: str | None) -> str:
         return {
@@ -220,6 +237,13 @@ class Runner:
         print(message, flush=True)
 
     def tick(self) -> None:
+        load_env()
+        if self._block_save:
+            self.publish()
+            return
+        if os.environ.get("OKX_LIVE") != "1":
+            self.publish_locked("未设置 OKX_LIVE=1。实盘进程不会连接账户，也不会下单。")
+            return
         if not self._ensure_client():
             self.state["phase"] = "missing_keys"
             self.save()
@@ -228,8 +252,12 @@ class Runner:
         self._refresh_private()
         self.state["last_error"] = ""
         if self.state.get("phase") == "missing_keys":
+            self.state["phase"] = "standby"
+        if self.state.get("phase") == "standby" and os.environ.get("OKX_ARM") == "1":
             self.state["phase"] = "wait_clock"
             self.state["scheduled"] = next_entry_bar(int(time.time() * 1000))
+        if self.state.get("phase") not in ("standby", "live_locked"):
+            self._ensure_leverage()
         self._sync()
         try:
             self._watch_risk()
@@ -246,11 +274,11 @@ class Runner:
         key = os.environ.get("OKX_API_KEY", "")
         secret = os.environ.get("OKX_SECRET_KEY", "")
         phrase = os.environ.get("OKX_PASSPHRASE", "")
-        if not (key and secret and phrase):
+        if os.environ.get("OKX_LIVE") != "1" or not (key and secret and phrase):
             self.client = None
             return False
         if self.client is None:
-            self.client = DemoClient(key, secret, phrase)
+            self.client = LiveClient(key, secret, phrase)
             try:
                 self._bootstrap()
             except Exception:
@@ -273,10 +301,22 @@ class Runner:
             }
         config = self.client.config()
         self.state["pos_mode"] = config.get("posMode") or "net_mode"
-        side = "long" if self.state["pos_mode"] == "long_short_mode" else None
-        if not self.state.get("lever_ready"):
-            self.client.set_leverage(INST_ID, "1", side)
-            self.state["lever_ready"] = True
+
+    def _ensure_leverage(self) -> None:
+        assert self.client is not None
+        if self.state.get("lever_ready"):
+            return
+        side = "long" if self.state.get("pos_mode") == "long_short_mode" else None
+        self.client.set_leverage(INST_ID, "1", side)
+        self.state["lever_ready"] = True
+
+    def publish_locked(self, text: str) -> None:
+        self.publish()
+        status = json.loads(STATUS_PATH.read_text())
+        status["phase"] = "live_locked"
+        status["phase_text"] = text
+        status["running"] = True
+        write_json(STATUS_PATH, status)
 
     def _refresh_public(self) -> None:
         rows = public_get(
@@ -417,6 +457,8 @@ class Runner:
         return None
 
     def _sync(self) -> None:
+        if self.state.get("phase") in ("standby", "live_locked"):
+            return
         row = self._position_row()
         if row is not None:
             self._on_long(row)
@@ -560,8 +602,10 @@ class Runner:
     def _while_flat(self) -> None:
         now_ms = int(time.time() * 1000)
         phase = self.state.get("phase")
+        if phase in ("standby", "live_locked"):
+            return
         if phase == "blocked":
-            self.state["phase"] = "armed" if self.state.get("limit_price") else "wait_clock"
+            self.state["phase"] = "armed" if self.state.get("limit_price") else "standby"
             phase = self.state["phase"]
         if phase == "pending_buy":
             self._watch_buy(now_ms)
@@ -772,7 +816,7 @@ class Runner:
 
 
 def _book_after(position: dict, fill: float | None) -> float:
-    """这笔账平仓后的本金。不用模拟账户里的其余资金。"""
+    """这笔账平仓后的本金。不用账户里的其余资金。"""
     equity_before = float(position.get("equity_before") or BOOK_EQUITY)
     coin_qty = float(position.get("coin_qty") or 0)
     entry = float(position.get("entry") or 0)
@@ -804,7 +848,7 @@ def main() -> None:
     load_env()
     runner = Runner()
     runner.publish()
-    print("模拟单已启动。只交易 NEAR 永续模拟盘，秘书问题4。", flush=True)
+    print("实盘进程已启动。未设置 OKX_LIVE=1 不会连接账户；未设置 OKX_ARM=1 不会开第一笔。", flush=True)
     while not STOP:
         try:
             runner.tick()
@@ -816,7 +860,7 @@ def main() -> None:
                 break
             time.sleep(1)
     runner.publish()
-    print("模拟单已停止。", flush=True)
+    print("实盘进程已停止。", flush=True)
 
 
 if __name__ == "__main__":

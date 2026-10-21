@@ -6,7 +6,7 @@ export default function Layout() {
   return (
     <div className="app-shell">
       <header className="topnav">
-        <p className="eyebrow">OKX 公开行情 · 本地重放 · 不下真实单</p>
+        <p className="eyebrow">回测只读本地行情 · 实盘需单独确认后才下单</p>
         <div className="nav-side">
           <nav>
             <NavLink to="/" end>统计</NavLink>
@@ -15,7 +15,7 @@ export default function Layout() {
             <NavLink to="/secretary-2">秘书问题2</NavLink>
             <NavLink to="/secretary-3">秘书问题3</NavLink>
             <NavLink to="/secretary-4">秘书问题4</NavLink>
-            <NavLink to="/demo">模拟单</NavLink>
+            <NavLink to="/demo">实盘</NavLink>
           </nav>
           <label className="coin-switch">
             币种
