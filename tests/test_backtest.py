@@ -11,6 +11,8 @@ from backtest import (
     fill_missing_funding,
     next_entry_ts,
     plan_secretary3,
+    plan_secretary4,
+    secretary_window,
     resample,
     run_backtest,
     secretary_reject_count,
@@ -487,6 +489,110 @@ class SecretaryImmediateTest(unittest.TestCase):
         self.assertEqual(result.entries_limit, 1)
 
 
+class SecretaryRollingWindowTest(unittest.TestCase):
+    def _closed(self, entry, exit_ts):
+        candles = [Candle(entry, 5, 5.02, 4.99, 5)]
+        ts = entry + QUARTER
+        while ts < exit_ts:
+            candles.append(Candle(ts, 5.02, 5.05, 4.99, 5.02))
+            ts += QUARTER
+        candles.append(Candle(exit_ts, 5.02, 5.2, 5.0, 5.1))
+        return candles
+
+    def test_five_minute_windows_keep_the_same_clock_span(self):
+        bar = 5 * 60 * 1000
+        offset, bars, last = secretary_window(bar, "secretary")
+        self.assertEqual((offset, bars, last), (0, 288, 287 * bar))
+        self.assertEqual(secretary_reject_count(bar, bars), 106)
+        offset, bars, last = secretary_window(bar, "secretary2")
+        self.assertEqual((offset, bars, last), (8 * 3_600_000, 145, 20 * 3_600_000))
+        self.assertEqual(secretary_reject_count(bar, bars), 53)
+
+    def test_secretary4_uses_thirty_two_bars_on_five_minute_candles(self):
+        bar = 5 * 60 * 1000
+        exit_ts = bj(2026, 3, 13, 9)
+        start, window_bars, reject = plan_secretary4(exit_ts, bar)
+        self.assertEqual(start, exit_ts + bar)
+        self.assertEqual(window_bars, 32)
+        self.assertEqual(reject, 12)
+        self.assertEqual(start + (window_bars - 1) * bar, bj(2026, 3, 13, 11, 40))
+
+    def test_window_is_thirty_two_bars_from_the_next_candle(self):
+        exit_ts = bj(2026, 3, 13, 9)
+        start, bars, reject = plan_secretary4(exit_ts, QUARTER)
+        self.assertEqual(start, exit_ts + QUARTER)
+        self.assertEqual(bars, 32)
+        self.assertEqual(reject, 12)
+        self.assertEqual(start + (bars - 1) * QUARTER, bj(2026, 3, 13, 17))
+
+    def test_observation_does_not_buy_until_a_lower_open(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 9)
+        candles = self._closed(entry, exit_ts)
+        start, _bars, reject = plan_secretary4(exit_ts, QUARTER)
+        for slot in range(reject):
+            candles.append(above_limit(start + slot * QUARTER))
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertIsNone(result.open_cycle)
+        signal = start + reject * QUARTER
+        candles.append(Candle(signal, 5.8, 5.9, 5.5, 5.85))
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, signal)
+        self.assertEqual(result.open_cycle.entry, 5.8)
+        self.assertEqual(result.entries_secretary, 1)
+
+    def test_last_bar_of_the_eight_hours_is_bought(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 9)
+        candles = self._closed(entry, exit_ts)
+        start, bars, _reject = plan_secretary4(exit_ts, QUARTER)
+        end = start + (bars - 1) * QUARTER
+        ts = start
+        while ts <= end:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, end)
+        self.assertEqual(result.entries_secretary_last, 1)
+
+    def test_window_crosses_midnight_without_buying_at_midnight(self):
+        entry = bj(2026, 3, 13, 18)
+        exit_ts = bj(2026, 3, 13, 20)
+        candles = self._closed(entry, exit_ts)
+        start, bars, _reject = plan_secretary4(exit_ts, QUARTER)
+        self.assertEqual(start, bj(2026, 3, 13, 20, 15))
+        midnight = bj(2026, 3, 14)
+        ts = start
+        while ts <= midnight:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertIsNone(result.open_cycle)
+        end = start + (bars - 1) * QUARTER
+        self.assertEqual(end, bj(2026, 3, 14, 4))
+        while ts <= end:
+            candles.append(above_limit(ts))
+            ts += QUARTER
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, end)
+        self.assertEqual(result.entries_secretary_last, 1)
+
+    def test_limit_fills_during_observation(self):
+        entry = bj(2026, 3, 13, 8)
+        exit_ts = bj(2026, 3, 13, 9)
+        candles = self._closed(entry, exit_ts)
+        start, _bars, _reject = plan_secretary4(exit_ts, QUARTER)
+        touch = start + 3 * QUARTER
+        candles.append(above_limit(start))
+        candles.append(above_limit(start + QUARTER))
+        candles.append(above_limit(start + 2 * QUARTER))
+        candles.append(Candle(touch, 6, 6.1, 4.9, 5.5))
+        result = run(candles, entry_mode="secretary4", first_entry_ts=entry)
+        self.assertEqual(result.open_cycle.entry_ts, touch)
+        self.assertEqual(result.open_cycle.entry, 5)
+        self.assertEqual(result.entries_limit, 1)
+
+
 class CoinCatalogTest(unittest.TestCase):
     def test_unknown_coin_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -496,17 +602,13 @@ class CoinCatalogTest(unittest.TestCase):
         spec = coin_spec("pump")
         self.assertEqual(spec["base"], "PUMP")
         self.assertEqual(spec["swap_id"], "PUMP-USDT-SWAP")
-        self.assertEqual(spec["spot_id"], "PUMP-USDT")
         self.assertTrue(spec["swap_cache"].name.endswith("pump-usdt-swap-15m.json"))
-        self.assertTrue(spec["spot_cache"].name.endswith("pump-usdt-spot-15m.json"))
 
     def test_hype_has_its_own_local_files(self):
         spec = coin_spec("hype")
         self.assertEqual(spec["base"], "HYPE")
         self.assertEqual(spec["swap_id"], "HYPE-USDT-SWAP")
-        self.assertEqual(spec["spot_id"], "HYPE-USDT")
         self.assertTrue(spec["swap_cache"].name.endswith("hype-usdt-swap-15m.json"))
-        self.assertTrue(spec["spot_cache"].name.endswith("hype-usdt-spot-15m.json"))
 
 
 class AddonTest(unittest.TestCase):

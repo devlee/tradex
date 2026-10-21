@@ -4,9 +4,7 @@ import { heatStyle } from "../spectrum";
 import { bookUrl, useCoin } from "../coin";
 
 const ADDON_NOTE = "表格每一行是仓位1。点开这一行，可以看到同一净目标下后来开出的仓位，以及这一仓建立时第一笔的开仓价。最后一行是总仓位，把这一净目标下各仓的数字加在一起。下跌只按仓位1当时那笔的开仓价计算，每再跌 10% 用 10,000 USDT 新开一仓，最多到跌 90%。新仓再被套不再加仓。";
-const SWAP_NOTE = `这张表是 NEAR-USDT 永续。第一笔仍是 2026-03-13 北京时间 0 点的开盘价。之后一笔结束就在该笔买价挂限价单，价格回到这个买价或更低就成交。到平仓日之后第 2 个北京日还没成交，就把当天 96 根 15 分钟线的开盘价按秘书问题处理：前 35 根只记最低价，不买；之后第一根开盘价低于这个最低价就买入；直到最后一根还没有，就买最后一根。限价单在这一天仍然有效。每个仓位起始资金 10,000、挂单费率 0.02%，没有记录的资金费按 0.01%。净目标从 1% 到 100%，每档 1%。限价买、秘书买、末根买都不含第一笔。${ADDON_NOTE}`;
-const SPOT_NOTE = `这张表是 NEAR-USDT 现货，进场和卖出规则与上面相同。用现货 15 分钟线，从 2026-03-13 北京时间 0 点起。每个仓位起始资金 10,000，挂单费率 0.08%。买入的是现货，没有资金费，也不会强平。净目标从 1% 到 100%，每档 1%。${ADDON_NOTE}`;
-
+const SWAP_NOTE = `这张表是 NEAR-USDT 永续。第一笔仍是 2026-03-13 北京时间 0 点的开盘价。之后一笔结束就在该笔买价挂限价单，价格回到这个买价或更低就成交。到平仓日之后第 2 个北京日还没成交，就把当天 96 根 15 分钟线的开盘价按秘书问题处理：前 35 根只记最低价，不买；之后第一根开盘价低于这个最低价就买入；直到最后一根还没有，就买最后一根。限价单在这一天仍然有效。每个仓位起始资金 10,000、挂单费率 0.02%，没有记录的资金费按 0.01%。净目标从 1% 到 50%，每档 1%。限价买、秘书买、末根买都不含第一笔。${ADDON_NOTE}`;
 function idealSells(equity, target, sells, times) {
   return equity * (1 + target) ** (sells * times);
 }
@@ -243,15 +241,11 @@ export function ResultTable({ rows, equity }) {
 export default function SecretaryPage() {
   const { coin } = useCoin();
   const [book, setBook] = useState(null);
-  const [spot, setSpot] = useState(null);
   const [error, setError] = useState("");
-  const [spotError, setSpotError] = useState("");
 
   useEffect(() => {
     setBook(null);
-    setSpot(null);
     setError("");
-    setSpotError("");
     fetch(bookUrl(coin, "secretary.json"))
       .then((response) => {
         if (!response.ok) throw new Error("永续表没有读到");
@@ -259,23 +253,15 @@ export default function SecretaryPage() {
       })
       .then(setBook)
       .catch((reason) => setError(reason.message || "永续表没有读到"));
-    fetch(bookUrl(coin, "secretary-spot.json"))
-      .then((response) => {
-        if (!response.ok) throw new Error("现货表没有读到");
-        return response.json();
-      })
-      .then(setSpot)
-      .catch((reason) => setSpotError(reason.message || "现货表没有读到"));
   }, [coin]);
 
   const swapNote = SWAP_NOTE.replaceAll("NEAR", coin);
-  const spotNote = SPOT_NOTE.replaceAll("NEAR", coin);
 
   return (
     <div className="layout">
       <aside>
         <h1>秘书问题进场</h1>
-        <p className="lede">周期结束后先在上一笔买价挂限价单。到平仓日之后第 2 个北京日还没买到，就用秘书问题在当天的 15 分钟开盘价里选一个更低的买点。下面两张表用同一套买卖规则，一张是永续，一张是现货。</p>
+        <p className="lede">周期结束后先在上一笔买价挂限价单。到平仓日之后第 2 个北京日还没买到，就用秘书问题在当天的 15 分钟开盘价里选一个更低的买点。</p>
         <ol className="rules">
           <li>第一笔用起点日期北京时间 0 点那根 15 分钟 K 线的开盘价。</li>
           <li>卖出规则与钟点进场相同：净赚到目标才卖，下跌不卖，卖完的余额是下一笔本金。</li>
@@ -283,7 +269,6 @@ export default function SecretaryPage() {
           <li>平仓当天和后一天只等这张限价单。同一根 K 线不既卖又买。</li>
           <li>第 2 个北京日仍未成交时，前 35 根开盘价只作为样本。之后第一根低于样本最低价的开盘价买入。</li>
           <li>当天直到最后一根都没有更低的开盘价，就按最后一根的开盘价买入。限价单在这一天仍然优先。</li>
-          <li>现货按 {coin}-USDT 的价格买入并持有，挂单费率 0.08%，没有资金费，也不会强平。</li>
           <li>仓位1的持仓价相对开仓价每再跌 10%，就用最初的 10,000 USDT 新开一个独立仓位。新仓不并进被套的那一笔，之后自己复利。新仓再被套不再加仓。</li>
         </ol>
       </aside>
@@ -294,13 +279,6 @@ export default function SecretaryPage() {
             <p>{error || swapNote}</p>
           </div>
           {book ? <ResultTable rows={book.rows} equity={book.equity} /> : null}
-        </section>
-        <section className="panel">
-          <div className="panel-head">
-            <h2>现货</h2>
-            <p>{spotError || spotNote}</p>
-          </div>
-          {spot ? <ResultTable rows={spot.rows} equity={spot.equity} /> : null}
         </section>
       </main>
     </div>

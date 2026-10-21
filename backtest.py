@@ -12,6 +12,8 @@
 秘书问题3不再等到平仓日后第 2 天。平仓后立刻从下一根选到当天 20:00；
 早于 8:00 就从当天 8:00 开始。这段不足 10 根，或已经过了 20:00，就改到
 下一个北京日的 8:00 到 20:00。限价单同样不受这个时段限制。
+秘书问题4也从下一根开始，但区间固定为 32 根，可以跨过午夜。15 分钟时
+这 32 根是 8 小时，5 分钟时是 2 小时 40 分。限价单在这 32 根里仍然优先。
 
 加仓不并进被套的那一笔。仓位1的持仓价相对这笔开仓价每再跌 10%，
 就用最初的起始资金另开一个独立账本，最多到跌 90%。新账本的第一笔按
@@ -224,6 +226,7 @@ def secretary_reject_count(bar_ms: int, bars: int | None = None) -> int:
 SESSION_FROM_MS = 8 * 3_600_000
 SESSION_LAST_MS = 20 * 3_600_000
 SECRETARY3_MIN_BARS = 10
+SECRETARY4_BARS = 32
 
 
 def secretary_window(bar_ms: int, entry_mode: str) -> tuple[int, int, int]:
@@ -251,6 +254,17 @@ def plan_secretary3(exit_ts: int, bar_ms: int) -> tuple[int, int, int, int, int]
     next_day = day + DAY_MS
     bars = (SESSION_LAST_MS - SESSION_FROM_MS) // bar_ms + 1
     return next_day, SESSION_FROM_MS, bars, SESSION_LAST_MS, secretary_reject_count(bar_ms, bars)
+
+
+def plan_secretary4(exit_ts: int, bar_ms: int) -> tuple[int, int, int]:
+    """秘书问题4的下一次选点。返回窗口第一根的时间、候选根数、观察根数。
+
+    关单那根不再买入。从下一根起固定 32 根，先观察 round(32/e) = 12 根。
+    15 分钟时末根开盘在起点之后 7 小时 45 分，收盘刚好满 8 小时。
+    5 分钟时这 32 根一共 2 小时 40 分。区间可以跨过午夜。
+    """
+    start = exit_ts + bar_ms
+    return start, SECRETARY4_BARS, secretary_reject_count(bar_ms, SECRETARY4_BARS)
 
 
 def fill_missing_funding(
@@ -392,7 +406,7 @@ def run_backtest(
     if not 0 <= entry_hour <= 23:
         result.note = "进场钟点需要在 0 到 23 之间。"
         return result
-    if entry_mode not in ("clock", "secretary", "secretary2", "secretary3"):
+    if entry_mode not in ("clock", "secretary", "secretary2", "secretary3", "secretary4"):
         result.note = "进场方式只能是钟点或秘书问题。"
         return result
 
@@ -401,6 +415,7 @@ def run_backtest(
     scheduled: int | None = first_entry_ts
     limit_price: float | None = None
     secretary_day: int | None = None
+    secretary_start: int | None = None
     sample_min: float | None = None
     window_from, window_bars, window_last = secretary_window(bar_ms, entry_mode)
     reject_bars = secretary_reject_count(bar_ms, window_bars)
@@ -428,11 +443,18 @@ def run_backtest(
         return events
 
     def arm_after_exit(exit_ts: int, entry_price: float) -> None:
-        nonlocal scheduled, limit_price, secretary_day, sample_min
+        nonlocal scheduled, limit_price, secretary_day, secretary_start, sample_min
         nonlocal window_from, window_bars, window_last, reject_bars
-        if entry_mode == "secretary3":
+        if entry_mode == "secretary4":
             scheduled = None
             limit_price = entry_price
+            secretary_day = None
+            sample_min = None
+            secretary_start, window_bars, reject_bars = plan_secretary4(exit_ts, bar_ms)
+        elif entry_mode == "secretary3":
+            scheduled = None
+            limit_price = entry_price
+            secretary_start = None
             sample_min = None
             secretary_day, window_from, window_bars, window_last, reject_bars = plan_secretary3(
                 exit_ts, bar_ms
@@ -518,6 +540,30 @@ def run_backtest(
         if slot >= window_bars - 1:
             open_position(candle.o, "secretary_last")
 
+    def consider_secretary4(candle: Candle) -> None:
+        nonlocal sample_min
+        if limit_price is None or secretary_start is None:
+            return
+        if candle.l <= limit_price:
+            fill = candle.o if candle.o <= limit_price else limit_price
+            open_position(fill, "limit")
+            return
+        if candle.ts < secretary_start:
+            return
+        last_ts = secretary_start + (window_bars - 1) * bar_ms
+        if candle.ts > last_ts:
+            open_position(candle.o, "secretary_last")
+            return
+        slot = (candle.ts - secretary_start) // bar_ms
+        if slot < reject_bars:
+            sample_min = candle.o if sample_min is None else min(sample_min, candle.o)
+            return
+        if slot < window_bars - 1 and sample_min is not None and candle.o < sample_min:
+            open_position(candle.o, "secretary")
+            return
+        if slot >= window_bars - 1:
+            open_position(candle.o, "secretary_last")
+
     for bar in candles:
         just_closed = False
         if position is not None:
@@ -579,6 +625,8 @@ def run_backtest(
             if pending_fill is not None and bar.ts >= first_entry_ts:
                 open_position(pending_fill, "addon")
                 pending_fill = None
+            elif entry_mode == "secretary4" and limit_price is not None:
+                consider_secretary4(bar)
             elif entry_mode in ("secretary", "secretary2", "secretary3") and limit_price is not None:
                 consider_secretary(bar)
             elif scheduled is not None:

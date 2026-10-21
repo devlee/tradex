@@ -1,4 +1,4 @@
-"""下载并缓存 OKX 永续和现货的 15 分钟 K 线、资金费。页面只读本地文件。"""
+"""下载并缓存 OKX 永续的 15 分钟 K 线、资金费。页面只读本地文件。"""
 
 from __future__ import annotations
 
@@ -23,33 +23,26 @@ COINS = {
     "NEAR": {
         "base": "NEAR",
         "swap_id": "NEAR-USDT-SWAP",
-        "spot_id": "NEAR-USDT",
         "uly": "NEAR-USDT",
         "swap_cache": DATA / "near-usdt-swap-15m.json",
-        "spot_cache": DATA / "near-usdt-spot-15m.json",
     },
     "PUMP": {
         "base": "PUMP",
         "swap_id": "PUMP-USDT-SWAP",
-        "spot_id": "PUMP-USDT",
         "uly": "PUMP-USDT",
         "swap_cache": DATA / "pump-usdt-swap-15m.json",
-        "spot_cache": DATA / "pump-usdt-spot-15m.json",
     },
     "HYPE": {
         "base": "HYPE",
         "swap_id": "HYPE-USDT-SWAP",
-        "spot_id": "HYPE-USDT",
         "uly": "HYPE-USDT",
         "swap_cache": DATA / "hype-usdt-swap-15m.json",
-        "spot_cache": DATA / "hype-usdt-spot-15m.json",
     },
 }
 CACHE_PATH = COINS["NEAR"]["swap_cache"]
 INST_ID = COINS["NEAR"]["swap_id"]
 
 _SWAP: dict[str, dict] = {}
-_SPOT: dict[str, dict] = {}
 
 
 def _get(path: str, params: dict[str, str]) -> dict:
@@ -74,10 +67,10 @@ def default_start_ms() -> int:
     return int(datetime(2026, 3, 13, tzinfo=SHANGHAI).timestamp() * 1000)
 
 
-def _pages(path: str, params: dict[str, str], start_ms: int, time_key: str) -> list[dict]:
+def _pages(path: str, params: dict[str, str], start_ms: int, time_key: str, max_pages: int = 600) -> list[dict]:
     rows: list[dict] = []
     after: str | None = None
-    for page in range(600):
+    for page in range(max_pages):
         query = dict(params)
         if after:
             query["after"] = after
@@ -125,11 +118,11 @@ def _read(path: Path, label: str) -> dict:
     return payload
 
 
-def _candles(rows: list, now_ms: int) -> list[list]:
+def _candles(rows: list, now_ms: int, bar_ms: int = BAR_MS) -> list[list]:
     by_ts: dict[int, list[float]] = {}
     for row in rows:
         ts = int(row[0])
-        if ts + BAR_MS > now_ms:
+        if ts + bar_ms > now_ms:
             continue
         by_ts[ts] = [float(row[1]), float(row[2]), float(row[3]), float(row[4])]
     return [[ts, *by_ts[ts]] for ts in sorted(by_ts)]
@@ -191,37 +184,43 @@ def fetch_swap(coin: str = "NEAR", now_ms: int | None = None, start_ms: int | No
     return payload
 
 
-def fetch_spot(coin: str = "NEAR", now_ms: int | None = None, start_ms: int | None = None) -> dict:
+def fetch_swap_5m(coin: str = "NEAR", now_ms: int | None = None, start_ms: int | None = None) -> dict:
+    """另存 5 分钟永续 K 线，不覆盖 15 分钟缓存。"""
     spec = coin_spec(coin)
+    bar_ms = 5 * 60 * 1000
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     start_ms = start_ms if start_ms is not None else default_start_ms()
-    inst_id = spec["spot_id"]
-    print(f"正在从 OKX 下载 {inst_id} 现货 15 分钟行情…", flush=True)
+    inst_id = spec["swap_id"]
+    pages = (now_ms - start_ms) // (bar_ms * 100) + 30
+    print(f"正在从 OKX 下载 {inst_id} 5 分钟行情…", flush=True)
     instrument = _get(
         "/api/v5/public/instruments",
-        {"instType": "SPOT", "instId": inst_id},
+        {"instType": "SWAP", "instId": inst_id},
     )["data"][0]
     candle_rows = _pages(
         "/api/v5/market/history-candles",
-        {"instId": inst_id, "bar": "15m", "limit": "100"},
+        {"instId": inst_id, "bar": "5m", "limit": "100"},
         start_ms,
         "0",
+        max_pages=pages,
     )
+    candles = _candles(candle_rows, now_ms, bar_ms)
     payload = {
+        "version": CACHE_VERSION,
         "coin": spec["base"],
-        "inst_id": inst_id,
-        "bar_ms": BAR_MS,
-        "start_ms": start_ms,
         "fetched_at": now_ms,
-        "tick_sz": float(instrument["tickSz"]),
+        "start_ms": start_ms,
+        "bar_ms": bar_ms,
+        "inst_id": inst_id,
+        "ct_val": float(instrument["ctVal"]),
         "lot_sz": float(instrument["lotSz"]),
         "min_sz": float(instrument["minSz"]),
-        "ct_val": 1,
-        "candles": _candles(candle_rows, now_ms),
+        "tick_sz": float(instrument["tickSz"]),
+        "candles": candles,
     }
-    _write(spec["spot_cache"], payload)
-    _SPOT[spec["base"]] = payload
-    print(f"已缓存 {len(payload['candles'])} 根现货 15 分钟线。", flush=True)
+    path = DATA / f"{spec['base'].lower()}-usdt-swap-5m.json"
+    _write(path, payload)
+    print(f"已缓存 {len(candles)} 根 5 分钟线到 {path.name}。", flush=True)
     return payload
 
 
@@ -236,16 +235,6 @@ def load_swap(coin: str = "NEAR") -> dict:
         return cached
     payload = _read(spec["swap_cache"], f"{spec['base']} 永续")
     _SWAP[spec["base"]] = payload
-    return payload
-
-
-def load_spot(coin: str = "NEAR") -> dict:
-    spec = coin_spec(coin)
-    cached = _SPOT.get(spec["base"])
-    if cached is not None:
-        return cached
-    payload = _read(spec["spot_cache"], f"{spec['base']} 现货")
-    _SPOT[spec["base"]] = payload
     return payload
 
 
@@ -291,7 +280,6 @@ def main() -> None:
     parser.add_argument("coin", choices=sorted(COINS))
     args = parser.parse_args()
     fetch_swap(args.coin)
-    fetch_spot(args.coin)
 
 
 if __name__ == "__main__":
