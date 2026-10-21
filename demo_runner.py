@@ -26,6 +26,7 @@ from backtest import (
 )
 from okx_data import SHANGHAI
 from okx_demo import DemoClient, OkxError, public_get
+import telegram_notice as tg
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -101,6 +102,7 @@ def fresh_state(now_ms: int) -> dict:
         "pos_mode": "net_mode",
         "lever_ready": False,
         "last_error": "",
+        "notices": [],
     }
 
 
@@ -159,6 +161,7 @@ class Runner:
             "order": self._public_order(),
             "cycles": (self.state.get("cycles") or [])[:20],
             "last_error": self.state.get("last_error") or "",
+            "telegram": tg.configured(),
             "note": "模拟盘。第一笔本金 10,000 USDT，之后只用这笔账的平仓余额。进程开着就一直轮询。",
         })
 
@@ -228,6 +231,14 @@ class Runner:
             self.state["phase"] = "wait_clock"
             self.state["scheduled"] = next_entry_bar(int(time.time() * 1000))
         self._sync()
+        try:
+            self._watch_risk()
+        except Exception:
+            traceback.print_exc()
+        try:
+            self._poll_telegram()
+        except Exception:
+            traceback.print_exc()
         self.save()
 
     def _ensure_client(self) -> bool:
@@ -304,9 +315,103 @@ class Runner:
             return book
         return min(book, self.available)
 
+    def _poll_telegram(self) -> None:
+        if not tg.configured():
+            return
+        if not self.state.get("telegram_menu"):
+            self.state["telegram_menu"] = tg.set_commands()
+        rows, offset = tg.updates(self.state.get("telegram_offset"))
+        if offset:
+            self.state["telegram_offset"] = offset
+        allowed = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
+        for row in rows:
+            message = row.get("message") or {}
+            chat = str((message.get("chat") or {}).get("id", ""))
+            if chat != allowed:
+                continue
+            command = tg.command_of(message.get("text") or "")
+            if command in {"/status", "/pos", "/position", "/仓位", "/状态"}:
+                tg.send(self._status_reply())
+            elif command in {"/help", "/start"}:
+                tg.send("发送 /status 查看当前仓位、挂单和本金。")
+
+    def _status_reply(self) -> str:
+        return tg.status_text(
+            self.phase_text(self._slot()),
+            self._book_equity(),
+            self.last_price,
+            self.state.get("position"),
+            self._public_order(),
+        )
+
+    def _ledger(self) -> tg.Ledger:
+        notices = self.state.setdefault("notices", [])
+        return tg.Ledger(notices)
+
+    def _report_remote(self, cl_id: str) -> None:
+        if not cl_id or self.client is None:
+            return
+        try:
+            row = self.client.order(INST_ID, cl_id)
+        except OkxError:
+            return
+        if row:
+            self._report_row(row)
+
+    def _report_row(self, row: dict) -> None:
+        cl_id = row.get("clOrdId") or row.get("ordId") or ""
+        if not cl_id:
+            return
+        part = tg.partial_fill(row)
+        if part:
+            self._ledger().latch(
+                f"partial:{cl_id}", True, tg.partial_text(row, part[0], part[1])
+            )
+        else:
+            self._ledger().latch(f"partial:{cl_id}", False, "")
+        if tg.is_full_fill(row):
+            self._ledger().once(f"filled:{cl_id}", tg.filled_text(row))
+
+    def _watch_risk(self) -> None:
+        if self.client is None:
+            return
+        levers: list[float] = []
+        shorts: list[float] = []
+        for row in self.client.positions(INST_ID):
+            lever = tg.lever_above_one(row)
+            if lever:
+                levers.append(lever)
+            if tg.is_short(row):
+                shorts.append(abs(_float(row.get("pos")) or 0))
+        try:
+            for row in self.client.leverage(INST_ID):
+                lever = tg.lever_above_one(row)
+                if lever:
+                    levers.append(lever)
+        except OkxError:
+            pass
+        ledger = self._ledger()
+        if levers:
+            ledger.latch("alert:leverage", True, tg.leverage_text(max(levers)))
+        else:
+            ledger.latch("alert:leverage", False, "")
+        if shorts:
+            ledger.latch("alert:short", True, tg.short_text(sum(shorts)))
+        else:
+            ledger.latch("alert:short", False, "")
+        seen = set()
+        for row in self.orders:
+            self._report_row(row)
+            seen.add(row.get("clOrdId"))
+        current = (self.state.get("order") or {}).get("clOrdId")
+        if current and current not in seen:
+            self._report_remote(current)
+
     def _position_row(self) -> dict | None:
         assert self.client is not None
         for row in self.client.positions(INST_ID):
+            if tg.is_short(row):
+                continue
             if abs(_float(row.get("pos")) or 0) > 0:
                 return row
         return None
@@ -325,6 +430,7 @@ class Runner:
         contracts = abs(_float(row.get("pos")) or 0)
         entry = _float(row.get("avgPx")) or 0
         local = self.state.get("position") or {}
+        buy_id = (self.state.get("order") or {}).get("clOrdId")
         if self.state.get("phase") != "long" or not local:
             equity_before = (self.state.get("order") or {}).get("equity_before") or self._book_equity()
             coin_qty = round(contracts * self.spec["ct_val"], 8)
@@ -344,6 +450,12 @@ class Runner:
             self.state["phase"] = "long"
             self.state["order"] = None
             self.state["limit_price"] = None
+            self._ledger().once(
+                f"open:{local['entry_ts']}",
+                tg.open_text(contracts, entry, local["equity_before"]),
+            )
+            if buy_id:
+                self._report_remote(buy_id)
         funding = self._funding_since(local["entry_ts"])
         if abs(funding - local.get("funding_pnl", 0)) > 1e-8:
             local["funding_pnl"] = funding
@@ -393,6 +505,7 @@ class Runner:
             "clOrdId": cl_id, "side": "sell", "px": price, "sz": size,
             "purpose": "target", "state": "live",
         }
+        self._ledger().once(f"place:{cl_id}", tg.placed_text(self.state["order"]))
 
     def _on_flat_after_long(self) -> None:
         position = self.state.get("position") or {}
@@ -412,6 +525,12 @@ class Runner:
         })
         self.state["book_equity"] = ended
         self.state["cycles"] = self.state["cycles"][:40]
+        self._ledger().once(
+            f"close:{now_ms}",
+            tg.close_text(position.get("contracts"), position.get("entry"), exit_price, ended),
+        )
+        if position.get("sell_id"):
+            self._report_remote(position["sell_id"])
         start, bars, reject = plan_secretary4(bar_ts, BAR_MS)
         self.state.update({
             "phase": "armed",
@@ -567,6 +686,7 @@ class Runner:
             "bar_ts": bar_ts, "equity_before": equity, "state": "live",
         }
         self.state["phase"] = "armed" if purpose == "limit" else "pending_buy"
+        self._ledger().once(f"place:{cl_id}", tg.placed_text(self.state["order"]))
 
     def _place_market_buy(self, purpose: str, bar_ts: int | None) -> None:
         if self._buy_is_working():
@@ -592,6 +712,7 @@ class Runner:
             "bar_ts": bar_ts, "equity_before": equity, "state": "live",
         }
         self.state["phase"] = "pending_buy"
+        self._ledger().once(f"place:{cl_id}", tg.placed_text(self.state["order"]))
 
     def _order_body(self, side: str, size: str, price: str | None, cl_id: str, reduce_only: bool) -> dict:
         body = {

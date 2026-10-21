@@ -69,6 +69,7 @@ export default function DemoPage() {
           <div><span>K 线</span><strong>5 分钟</strong></div>
           <div><span>净目标</span><strong>2%</strong></div>
           <div><span>环境</span><strong>模拟盘</strong></div>
+          <div><span>电报</span><strong>{book?.telegram ? "已接入" : "未配置"}</strong></div>
           <div><span>杠杆</span><strong>1 倍全仓 · 只做多</strong></div>
           <div><span>限价买价</span><strong>{price(book?.limit_price)}</strong></div>
           <div><span>下一钟点</span><strong>{when(book?.scheduled)}</strong></div>

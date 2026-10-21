@@ -81,6 +81,11 @@ class DemoClient:
             body["posSide"] = pos_side
         self._request("POST", "/api/v5/account/set-leverage", body=body)
 
+    def leverage(self, inst_id: str) -> list[dict]:
+        return self._request(
+            "GET", "/api/v5/account/leverage-info", {"instId": inst_id, "mgnMode": "cross"}
+        ).get("data") or []
+
     def positions(self, inst_id: str) -> list[dict]:
         return self._request("GET", "/api/v5/account/positions", {"instId": inst_id}).get("data") or []
 
