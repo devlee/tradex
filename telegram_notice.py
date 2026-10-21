@@ -1,4 +1,4 @@
-"""实盘的 Telegram 通知和告警。没配钥匙时不发送，也不打断下单。"""
+"""模拟单的 Telegram 通知和告警。没配钥匙时不发送，也不打断下单。"""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def command_of(text: str) -> str:
 
 def status_text(phase_text: str, book, last_price, position: dict | None, order: dict | None) -> str:
     lines = [
-        f"【实盘】{phase_text}",
+        f"【状态】{phase_text}",
         f"本金 {_money(book)}",
         f"最新价 {last_price if last_price is not None else '—'}",
     ]

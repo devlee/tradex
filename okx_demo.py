@@ -1,4 +1,4 @@
-"""OKX 实盘私有接口。请求不带 x-simulated-trading，会打到真实账户。"""
+"""OKX 模拟盘私有接口。所有请求都带 x-simulated-trading: 1，不会打到实盘。"""
 
 from __future__ import annotations
 
@@ -13,14 +13,15 @@ import urllib.request
 from datetime import datetime, timezone
 
 HOST = "https://openapi.okx.com"
-USER_AGENT = "tradex-live/0.1"
+SIMULATED = "1"
+USER_AGENT = "tradex-demo/0.1"
 
 
 class OkxError(RuntimeError):
     pass
 
 
-class LiveClient:
+class DemoClient:
     def __init__(self, api_key: str, secret: str, passphrase: str) -> None:
         self.api_key = api_key
         self.secret = secret
@@ -40,6 +41,7 @@ class LiveClient:
         request.add_header("OK-ACCESS-SIGN", sign)
         request.add_header("OK-ACCESS-TIMESTAMP", stamp)
         request.add_header("OK-ACCESS-PASSPHRASE", self.passphrase)
+        request.add_header("x-simulated-trading", SIMULATED)
         request.add_header("Content-Type", "application/json")
         request.add_header("User-Agent", USER_AGENT)
         last_error: Exception | None = None

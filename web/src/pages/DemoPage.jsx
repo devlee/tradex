@@ -29,7 +29,7 @@ export default function DemoPage() {
           }
         })
         .catch(() => {
-          if (!stop) setError("实盘状态读不出来。");
+          if (!stop) setError("模拟单状态读不出来。");
         });
     };
     load();
@@ -46,18 +46,17 @@ export default function DemoPage() {
   return (
     <main className="layout">
       <section className="panel">
-        <p className="eyebrow">OKX 实盘 · NEAR-USDT 永续 · 秘书问题4</p>
-        <h1>实盘</h1>
+        <p className="eyebrow">OKX 模拟盘 · NEAR-USDT 永续 · 秘书问题4</p>
+        <h1>模拟单</h1>
         <p className="lede">
-          后台进程开着就盯 NEAR 永续，关掉进程就停止。页面只展示状态，不下单。
-          请求不带模拟盘标记。必须设置 OKX_LIVE=1 才会连接账户，再设置 OKX_ARM=1 才会开第一笔。
+          后台进程开着就按秘书问题4交易 NEAR 永续，关掉进程就停止。页面只展示状态，不下单。
           K 线是 5 分钟，窗口固定 32 根，也就是 2 小时 40 分。净目标 2%，手续费按 0.02% 计算卖价。
-          第一笔本金只用 10,000 USDT。平仓后这笔账上的余额才是下一笔本金。
+          第一笔启动后立即市价开仓，本金只用 10,000 USDT。平仓后这笔账上的余额才是下一笔本金。
         </p>
         {error && <p className="warning">{error}</p>}
         {book?.last_error && <p className="warning">{book.last_error}</p>}
         <p className={book?.running ? "demo-live" : "warning"}>
-          {book ? book.phase_text : "正在读取实盘状态。"}
+          {book ? book.phase_text : "正在读取模拟单状态。"}
         </p>
         <div className="stats">
           <div className="stat"><span>状态</span><strong>{book?.running ? "运行中" : "未运行"}</strong></div>
@@ -69,7 +68,7 @@ export default function DemoPage() {
           <div><span>合约</span><strong>{book?.inst_id || "NEAR-USDT-SWAP"}</strong></div>
           <div><span>K 线</span><strong>5 分钟</strong></div>
           <div><span>净目标</span><strong>2%</strong></div>
-          <div><span>环境</span><strong>实盘</strong></div>
+          <div><span>环境</span><strong>模拟盘</strong></div>
           <div><span>电报</span><strong>{book?.telegram ? "已接入" : "未配置"}</strong></div>
           <div><span>杠杆</span><strong>1 倍全仓 · 只做多</strong></div>
           <div><span>限价买价</span><strong>{price(book?.limit_price)}</strong></div>

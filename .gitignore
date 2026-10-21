@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 data/*.json
+data/live/
 .env
 .DS_Store
 web/node_modules/

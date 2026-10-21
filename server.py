@@ -27,7 +27,7 @@ from okx_data import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-DEMO_STATUS = ROOT / "data" / "live-status.json"
+DEMO_STATUS = ROOT / "data" / "demo-status.json"
 LOAD_LOCK = threading.Lock()
 
 RULES = [
@@ -45,10 +45,9 @@ def demo_status() -> dict:
     if not DEMO_STATUS.is_file():
         return {
             "running": False,
-            "simulated": False,
-            "trading": "live",
+            "simulated": True,
             "phase": "down",
-            "phase_text": "实盘程序没有在跑。在项目目录执行 python3 demo_runner.py。未设置 OKX_ARM=1 时不会开仓。",
+            "phase_text": "模拟单程序没有在跑。在项目目录执行 python3 demo_runner.py。",
             "inst_id": "NEAR-USDT-SWAP",
             "strategy": "秘书问题4",
             "note": "进程开着就一直轮询，关掉进程就停止下单。",
@@ -58,7 +57,7 @@ def demo_status() -> dict:
     payload["running"] = age < 20_000
     if not payload["running"]:
         payload["phase"] = "down"
-        payload["phase_text"] = "实盘程序已停止。重新执行 python3 demo_runner.py 才会继续看盘。"
+        payload["phase_text"] = "模拟单程序已停止。重新执行 python3 demo_runner.py 才会继续下单。"
     return payload
 
 
